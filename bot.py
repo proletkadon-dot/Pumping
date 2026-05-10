@@ -9,7 +9,7 @@ CHAT_ID = "694614387"
 # Временные ослабленные настройки (для теста)
 CHECK_INTERVAL = 60                     # каждую минуту
 TOP_COINS = 200
-MIN_VOLUME_USDT = 500_000               # снизили
+MIN_VOLUME_USDT = 300_000               # снизили
 MIN_5MIN_CHANGE = 0.5                   # вместо 2.0
 LEVERAGE = 2
 
