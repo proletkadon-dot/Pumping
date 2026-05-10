@@ -3,16 +3,6 @@ import time
 import math
 from datetime import datetime
 
-TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
-CHAT_ID = "694614387"
-
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
-    except:
-        pass
-
 def get_klines(symbol, interval='5m', limit=500):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
@@ -21,9 +11,10 @@ def get_klines(symbol, interval='5m', limit=500):
             return [], [], []
         closes = [float(c[4]) for c in data]
         highs = [float(c[2]) for c in data]
-        return closes, highs
+        lows = [float(c[3]) for c in data]
+        return closes, highs, lows
     except:
-        return [], []
+        return [], [], []
 
 def find_resistance(highs, current_price, lookback=200):
     highs_seg = highs[-lookback:]
@@ -36,8 +27,7 @@ def find_resistance(highs, current_price, lookback=200):
     nearest = min([r for r in resistances if r > current_price], default=None)
     return nearest
 
-def get_rsi(symbol, timeframe='5m', period=14):
-    closes, _ = get_klines(symbol, interval=timeframe, limit=period+5)
+def get_rsi(closes, period=14):
     if len(closes) < period+1:
         return None
     gains, losses = [], []
@@ -51,34 +41,37 @@ def get_rsi(symbol, timeframe='5m', period=14):
         return 100
     return 100 - 100/(1+avg_gain/avg_loss)
 
-def count_touches(symbol, level, timeframe='5m', days=3):
-    intervals = {'5m': 12*24, '15m': 4*24, '30m': 2*24, '1h': 24}
-    limit = intervals.get(timeframe, 100) * days
-    _, highs = get_klines(symbol, interval=timeframe, limit=limit)
+def count_touches(highs, level, tolerance=0.002):
     touches = 0
     for h in highs:
-        if abs(h - level) / level * 100 < 0.3:
+        if abs(h - level) / level < tolerance:
             touches += 1
     return touches
 
 def main():
-    symbol = "SOL"
-    send_telegram(f"🔍 Диагностика {symbol} запущена. Отчёт каждые 5 мин.")
+    test_coins = ["SOL", "XRP", "ADA", "DOGE", "MATIC"]
+    print("Диагностика SHORT сигналов. Ожидайте...")
     while True:
-        closes, highs = get_klines(symbol, '5m', 500)
-        if len(closes) < 300:
-            send_telegram("Недостаточно данных")
-        else:
+        print(f"\n--- {datetime.now().strftime('%H:%M:%S')} ---")
+        for sym in test_coins:
+            closes, highs, lows = get_klines(sym, '5m', 500)
+            if len(closes) < 300:
+                print(f"{sym}: недостаточно данных")
+                continue
             price = closes[-1]
             res = find_resistance(highs, price)
-            dist = (res - price) / price * 100 if res else None
-            rsi5 = get_rsi(symbol, '5m')
-            rsi1h = get_rsi(symbol, '1h')
-            touches = count_touches(symbol, res, '5m', 3) if res else 0
-            msg = f"📊 {symbol}\nЦена: {price:.4f}\nСопротивление: {res:.4f} (+{dist:.2f}%)" if res else f"Сопротивление не найдено"
-            msg += f"\nRSI 5m: {rsi5:.1f}, RSI 1h: {rsi1h:.1f}\nКасаний: {touches}"
-            send_telegram(msg)
-        time.sleep(300)
+            if res:
+                dist = (res - price) / price * 100
+                print(f"{sym}: цена {price:.4f}, сопротивление {res:.4f} (+{dist:.2f}%)")
+                # RSI на 5m и 1h
+                rsi_5m = get_rsi(closes)
+                closes_1h, _, _ = get_klines(sym, '1h', 50)
+                rsi_1h = get_rsi(closes_1h) if len(closes_1h) >= 15 else None
+                touches = count_touches(highs, res)
+                print(f"   RSI 5m: {rsi_5m:.1f}, RSI 1h: {rsi_1h:.1f if rsi_1h else '?'}, касаний: {touches}")
+            else:
+                print(f"{sym}: сопротивление не найдено")
+        time.sleep(600)
 
 if __name__ == "__main__":
     main()
