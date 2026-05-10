@@ -9,8 +9,16 @@ CHAT_ID = "694614387"
 
 # Список монет (можете заменить на свой)
 SYMBOLS = [
-    "1000LUNC", "SOL", "XRP", "ADA", "DOGE", "MATIC", "DOT", "AVAX",
-    "LINK", "LTC", "NEAR", "ATOM", "FIL", "ALGO", "VET", "FTM"
+    # Топ по капитализации
+    "1000LUNC", "SOL", "XRP", "ADA", "DOGE", "MATIC", "DOT", "AVAX", "SHIB", "LINK",
+    "LTC", "NEAR", "ATOM", "FIL", "ALGO", "VET", "ICP", "EGLD", "THETA", "FTM",
+    "SAND", "MANA", "AXS", "ENJ", "ZIL", "KLAY", "CHZ", "ONE", "ICX", "XTZ",
+    # Средние альты
+    "AAVE", "BCH", "BSV", "EOS", "TRX", "XLM", "XTZ", "ZEC", "DASH", "NEO",
+    "ONT", "QTUM", "WAVES", "KSM", "RUNE", "LUNA2", "USTC", "ANC", "MIR", "ANC",
+    # Мемкоины и новое
+    "PEPE", "WIF", "BONK", "FLOKI", "DOGS", "NOT", "TON", "OP", "ARB", "SUI",
+    "APT", "INJ", "SEI", "TIA", "PYTH", "JUP", "ONDO", "STRK", "ENA", "ETHFI"
 ]
 
 CHECK_INTERVAL = 600                # 10 минут (можно меньше)
