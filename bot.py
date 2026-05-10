@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 
 # === НАСТРОЙКИ ===
-TELEGRAM_TOKEN = "8590220699:AAG6U7JoOH638P-LhA5Ow-Byr2cgh7thAAE"  # Замените на токен от @BotFather
+TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"  # Замените на токен от @BotFather
 
 # База данных сигналов (в реальном проекте используйте БД)
 SIGNALS_DATA = [
