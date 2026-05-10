@@ -7,13 +7,11 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
-# Количество монет для анализа (все USDT пары на Binance, но можно ограничить)
-MAX_PAIRS = 500                     # максимум монет (поставьте 9999 для всех)
+MAX_PAIRS = 500                     # максимум USDT пар
 MIN_24H_VOLUME_USDT = 100_000       # мин. объём $100k (0 = без фильтра)
-
-CHECK_INTERVAL = 1200               # 20 минут (чтобы успеть обработать много монет)
-LOOKBACK_CANDLES = 1000             # сколько 5m свечей для уровней (~3-4 дня)
-MIN_TOUCHES = 3                     # минимальное количество касаний уровня
+CHECK_INTERVAL = 1200               # 20 минут
+LOOKBACK_CANDLES = 1000
+MIN_TOUCHES = 3
 LEVERAGE = 20
 RISK_PERCENT = 1.0
 TP_PERCENT = 2.0
@@ -30,7 +28,6 @@ def send_telegram(text):
         pass
 
 def get_all_usdt_pairs():
-    """Возвращает список всех USDT пар с Binance, сортировка по объёму"""
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
         r = requests.get(url, timeout=15)
@@ -38,12 +35,10 @@ def get_all_usdt_pairs():
         if not isinstance(data, list):
             return []
         usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
-        # Сортируем по объёму (quoteVolume) от большего к меньшему
         usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
         coins = []
         for pair in usdt_pairs[:MAX_PAIRS]:
             sym = pair['symbol'].replace('USDT', '')
-            # Исключаем стейблкоины, BTC, ETH (можно убрать)
             if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
                 continue
             vol = float(pair['quoteVolume'])
@@ -159,32 +154,22 @@ def analyze_coin(symbol):
     support, resistance = find_support_resistance(highs_5m, lows_5m, current_price, lookback=200)
     fibo = calculate_fibo_levels(highs_5m, lows_5m, closes_5m)
     
-    dist_to_support = abs(current_price - support) / current_price * 100 if support else 100
     dist_to_resistance = abs(current_price - resistance) / current_price * 100 if resistance else 100
     
-    is_long = None
-    level_price = None
-    level_type = None
-    fibo_level = None
-    if support and dist_to_support < 1.0:
-        is_long = True
-        level_price = support
-        level_type = 'support'
-        for f, val in fibo.items():
-            if abs(level_price - val) / level_price * 100 < 0.5:
-                fibo_level = f
-                break
-    elif resistance and dist_to_resistance < 1.0:
-        is_long = False
-        level_price = resistance
-        level_type = 'resistance'
-        for f, val in fibo.items():
-            if abs(level_price - val) / level_price * 100 < 0.5:
-                fibo_level = f
-                break
-    else:
+    # Только SHORT: цена должна быть близка к сопротивлению
+    if not resistance or dist_to_resistance >= 1.0:
         return None
     
+    level_price = resistance
+    level_type = 'resistance'
+    # Отмечаем, если сопротивление совпадает с уровнем Фибо 0.236 или 0.382 (хорошо для short)
+    fibo_level = None
+    for f, val in fibo.items():
+        if abs(level_price - val) / level_price * 100 < 0.5 and (f == 0.236 or f == 0.382):
+            fibo_level = f
+            break
+    
+    # Подтверждение на таймфреймах
     confirmed_tfs = []
     for tf in TIMEFRAMES:
         touches = count_touches(symbol, level_price, tf, lookback_days=3)
@@ -193,51 +178,36 @@ def analyze_coin(symbol):
     if len(confirmed_tfs) < 2:
         return None
     
+    # RSI для short – не должен быть слишком низким (не входить в перепроданности)
     rsi_5m = get_rsi(symbol, '5m')
     rsi_1h = get_rsi(symbol, '1h')
     if rsi_5m is None or rsi_1h is None:
         return None
-    
-    if is_long and rsi_5m > 60:
-        return None
-    if not is_long and rsi_5m < 40:
+    if rsi_5m < 40:
         return None
     
     volume_24h = get_24h_volume(symbol)
     volume_status = "🟢" if volume_24h > 50_000_000 else "🟡" if volume_24h > 10_000_000 else "🔴"
     funding = get_funding(symbol)
     funding_str = f"{funding:.4f}%" if funding is not None else "нет данных"
-    funding_ok = (is_long and funding and funding < 0) or (not is_long and funding and funding > 0)
+    funding_ok = (funding and funding > 0)  # для short положительный фандинг желателен
     
-    if is_long:
-        direction = "LONG"
-        entry_price = level_price * (1 + LIMIT_OFFSET_PERCENT / 100)
-        tp1 = entry_price * (1 + TP_PERCENT / 100)
-        tp2_candidates = []
-        if resistance and resistance > entry_price:
-            tp2_candidates.append(resistance)
-        for f, val in fibo.items():
-            if val > entry_price and (f == 0.5 or f == 0.618):
-                tp2_candidates.append(val)
-        tp2 = min(tp2_candidates) if tp2_candidates else entry_price * 1.03
-        sl_price = level_price * (1 - SL_OFFSET_PERCENT / 100)
-        sl_percent = (entry_price - sl_price) / entry_price * 100
-    else:
-        direction = "SHORT"
-        entry_price = level_price * (1 - LIMIT_OFFSET_PERCENT / 100)
-        tp1 = entry_price * (1 - TP_PERCENT / 100)
-        tp2_candidates = []
-        if support and support < entry_price:
-            tp2_candidates.append(support)
-        for f, val in fibo.items():
-            if val < entry_price and (f == 0.5 or f == 0.618):
-                tp2_candidates.append(val)
-        tp2 = max(tp2_candidates) if tp2_candidates else entry_price * 0.97
-        sl_price = level_price * (1 + SL_OFFSET_PERCENT / 100)
-        sl_percent = (sl_price - entry_price) / entry_price * 100
-    
+    # Расчёт уровней для SHORT
+    entry_price = level_price * (1 - LIMIT_OFFSET_PERCENT / 100)   # лимитный ордер чуть ниже сопротивления
+    tp1 = entry_price * (1 - TP_PERCENT / 100)                    # тейк на 2% вниз
+    # Второй тейк: ближайшая поддержка или уровень Фибо 0.5
+    tp2_candidates = []
+    if support and support < entry_price:
+        tp2_candidates.append(support)
+    for f, val in fibo.items():
+        if val < entry_price and (f == 0.5 or f == 0.618):
+            tp2_candidates.append(val)
+    tp2 = max(tp2_candidates) if tp2_candidates else entry_price * 0.97
+    sl_price = level_price * (1 + SL_OFFSET_PERCENT / 100)        # стоп выше сопротивления
+    sl_percent = (sl_price - entry_price) / entry_price * 100
     risk_to_deposit = sl_percent * LEVERAGE * (RISK_PERCENT / 100)
-    side_emoji = "🔴 SHORT" if not is_long else "🟢 LONG"
+    
+    side_emoji = "🔴 SHORT"
     level_desc = f"{level_price:.6f} ({level_type}"
     if fibo_level:
         level_desc += f", Фибо {fibo_level}"
@@ -266,11 +236,11 @@ def analyze_coin(symbol):
 • До зоны: {abs((entry_price - level_price)/level_price*100):.2f}%
 
 🎯 Тейк-профит:
-• TP1 {TP_PERCENT}%: {tp1:.6f} ({'+' if is_long else '-'}{TP_PERCENT}%) — полное закрытие
+• TP1 {TP_PERCENT}%: {tp1:.6f} (-{TP_PERCENT}%) — полное закрытие
 • Цель отката (Фибо 0.5): {tp2:.6f}
 
 🛑 Стоп-лосс:
-• SL: {sl_price:.6f} ({'+' if not is_long else '-'}{sl_percent:.2f}%)
+• SL: {sl_price:.6f} (+{sl_percent:.2f}%)
 • Оценка к депозиту: ~{risk_to_deposit:.2f}% (при {RISK_PERCENT}% позиции и {LEVERAGE}x)
 
 ⚠️ Замечания:
@@ -283,8 +253,8 @@ def analyze_coin(symbol):
     return msg
 
 def main():
-    send_telegram("🚀 Бот 2 (весь рынок) запущен. Анализ всех USDT пар на Binance.")
-    print(f"Бот запущен. Загружаю список монет...")
+    send_telegram("🚀 Бот SHORT (только продажа) запущен. Анализ всего рынка USDT пар.")
+    print("Бот запущен. Анализ SHORT сигналов каждые 20 минут.")
     while True:
         coins = get_all_usdt_pairs()
         if not coins:
