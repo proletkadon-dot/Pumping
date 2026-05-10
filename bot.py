@@ -13,7 +13,7 @@ SYMBOLS = [
     "LINK", "LTC", "NEAR", "ATOM", "FIL", "ALGO", "VET", "FTM"
 ]
 
-CHECK_INTERVAL = 600                # 10 минут (можно меньше)
+CHECK_INTERVAL = 400                # 10 минут (можно меньше)
 LOOKBACK_CANDLES = 2000             # сколько 5m свечей для поиска уровней (~7 дней)
 MIN_TOUCHES = 3                     # минимальное количество касаний уровня для подтверждения
 LEVERAGE = 20                       # плечо
