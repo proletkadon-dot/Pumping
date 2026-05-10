@@ -7,18 +7,18 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
-MAX_PAIRS = 200                     # максимум монет для анализа (по объёму)
-MIN_24H_VOLUME_USDT = 200_000       # мин. объём $200k
-CHECK_INTERVAL = 600                # 10 минут (уменьшил для частоты)
-LOOKBACK_CANDLES = 500              # сколько 5m свечей для уровней (~2 дня)
-MIN_TOUCHES = 2                     # минимальное количество касаний (ослаблено)
+MAX_PAIRS = 200                     # максимум монет для анализа
+MIN_24H_VOLUME_USDT = 200_000       # мин. объём $200k (не используется в списках, но оставлено)
+CHECK_INTERVAL = 600                # 10 минут
+LOOKBACK_CANDLES = 500              # сколько 5m свечей для уровней
+MIN_TOUCHES = 2                     # минимальное количество касаний
 LEVERAGE = 20
 RISK_PERCENT = 1.0
 TP_PERCENT = 2.0
 SL_OFFSET_PERCENT = 0.5
 LIMIT_OFFSET_PERCENT = 0.2
 TIMEFRAMES = ['5', '15', '30', '60', '240']   # минуты
-DISTANCE_TO_RESISTANCE_PERCENT = 2.0          # цена ближе 2% к сопротивлению (ослаблено)
+DISTANCE_TO_RESISTANCE_PERCENT = 2.0          # цена ближе 2% к сопротивлению
 RSI_MIN_FOR_SHORT = 35                         # RSI не ниже 35
 # =================================
 
@@ -29,16 +29,15 @@ def send_telegram(text):
     except:
         pass
 
-# ---------- ПОЛУЧЕНИЕ СПИСКА МОНЕТ (KuCoin + Gate.io + резерв) ----------
+# ---------- ПОЛУЧЕНИЕ СПИСКА МОНЕТ (KuCoin, Gate.io, BingX) ----------
 def get_all_usdt_pairs():
-    # Пробуем KuCoin
+    # 1. KuCoin
     try:
         url = "https://api.kucoin.com/api/v1/symbols"
         r = requests.get(url, timeout=10)
         data = r.json()
         if data['code'] == '200000':
             symbols = [s['symbol'] for s in data['data'] if s['symbol'].endswith('-USDT')]
-            # Сортировка по объёму – нет прямого поля, берём первые MAX_PAIRS
             coins = []
             for sym in symbols[:MAX_PAIRS]:
                 base = sym.replace('-USDT', '')
@@ -51,7 +50,7 @@ def get_all_usdt_pairs():
     except Exception as e:
         print(f"KuCoin список не удался: {e}")
     
-    # Пробуем Gate.io
+    # 2. Gate.io
     try:
         url = "https://api.gateio.ws/api/v4/spot/currency_pairs"
         r = requests.get(url, timeout=10)
@@ -69,14 +68,33 @@ def get_all_usdt_pairs():
     except Exception as e:
         print(f"Gate.io список не удался: {e}")
     
+    # 3. BingX
+    try:
+        url = "https://open-api.bingx.com/openApi/spot/v1/common/symbols"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data.get('code') == 0:
+            symbols = [s['symbol'] for s in data['data'] if s['symbol'].endswith('USDT')]
+            coins = []
+            for sym in symbols[:MAX_PAIRS]:
+                base = sym.replace('USDT', '')
+                if base in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD']:
+                    continue
+                coins.append({'symbol': base, 'volume': 0})
+            if coins:
+                print(f"Список монет с BingX: {len(coins)}")
+                return coins[:MAX_PAIRS]
+    except Exception as e:
+        print(f"BingX список не удался: {e}")
+    
     # Резервный список
     fallback = ["SOL","XRP","ADA","DOGE","MATIC","DOT","AVAX","LINK","LTC","NEAR","ATOM","FIL","VET","ALGO","ICP","FTM","SAND","MANA","ENJ","CHZ","AAVE","EOS","TRX","XLM","NEO","PEPE","WIF","FLOKI","TON","OP","ARB","SUI","APT","INJ","SEI","TIA","ONDO","STRK","ETHFI"]
     print(f"Использую резервный список из {len(fallback)} монет")
     return [{'symbol': s, 'volume': 0} for s in fallback[:MAX_PAIRS]]
 
-# ---------- ПОЛУЧЕНИЕ КЛИНОВ (5m) с трёх источников с fallback ----------
+# ---------- ПОЛУЧЕНИЕ КЛИНОВ (5m) с трёх бирж + BingX ----------
 def get_klines(symbol, interval_minutes=5, limit=500):
-    # Пробуем KuCoin
+    # 1. KuCoin
     try:
         url = f"https://api.kucoin.com/api/v1/market/candles?type={interval_minutes}min&symbol={symbol}-USDT&limit={limit}"
         r = requests.get(url, timeout=8)
@@ -87,12 +105,11 @@ def get_klines(symbol, interval_minutes=5, limit=500):
             highs = [float(c[1]) for c in candles]
             lows = [float(c[0]) for c in candles]
             volumes = [float(c[5]) for c in candles]
-            # KuCoin возвращает от старых к новым, порядок правильный
             return closes, highs, lows, volumes
-    except Exception as e:
+    except:
         pass
     
-    # Пробуем Gate.io
+    # 2. Gate.io
     try:
         url = f"https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={symbol}_USDT&interval={interval_minutes}m&limit={limit}"
         r = requests.get(url, timeout=8)
@@ -102,12 +119,28 @@ def get_klines(symbol, interval_minutes=5, limit=500):
             highs = [float(c[3]) for c in data]
             lows = [float(c[4]) for c in data]
             volumes = [float(c[5]) for c in data]
-            # Gate.io возвращает от старых к новым
             return closes, highs, lows, volumes
-    except Exception as e:
+    except:
         pass
     
-    # Пробуем Binance (если повезёт)
+    # 3. BingX
+    try:
+        interval_str = f"{interval_minutes}m"
+        url = f"https://open-api.bingx.com/openApi/spot/v1/market/kline?symbol={symbol}-USDT&interval={interval_str}&limit={limit}"
+        r = requests.get(url, timeout=8)
+        data = r.json()
+        if data.get('code') == 0 and data.get('data'):
+            candles = data['data']
+            # BingX возвращает: [open, high, low, close, volume, ...]
+            closes = [float(c[3]) for c in candles]
+            highs = [float(c[1]) for c in candles]
+            lows = [float(c[2]) for c in candles]
+            volumes = [float(c[4]) for c in candles]
+            return closes, highs, lows, volumes
+    except:
+        pass
+    
+    # 4. Binance (на всякий случай)
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval_minutes}m&limit={limit}"
         r = requests.get(url, timeout=8)
@@ -125,8 +158,8 @@ def get_klines(symbol, interval_minutes=5, limit=500):
     return [], [], [], []
 
 # ---------- ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (анализ, уровни, индикаторы) без изменений ----------
-# (см. предыдущие версии – они полностью идентичны, поэтому я их не повторяю,
-#  а сразу дам полный код с ними. Ниже идёт продолжение...)
+# (В целях экономии места я не копирую их сюда, но они должны быть идентичны предыдущей версии.
+#  Ниже я приведу полный код без сокращений, чтобы вы могли скопировать его целиком.)
 
 def find_support_resistance(highs, lows, current_price, lookback=200):
     highs_seg = highs[-lookback:]
@@ -164,7 +197,7 @@ def calculate_fibo_levels(highs, lows, closes):
         levels[fib] = start + diff * fib
     return levels
 
-def count_touches(symbol, level_price, interval_min, lookback_days=3):
+def count_touches(symbol, level_price, interval_min, lookback_days=2):
     intervals = {'5': 12*24, '15': 4*24, '30': 2*24, '60': 24, '240': 6}
     limit = intervals.get(str(interval_min), 100) * lookback_days
     _, highs, lows, _ = get_klines(symbol, interval_minutes=interval_min, limit=limit)
@@ -320,7 +353,7 @@ def analyze_coin(symbol):
     return msg
 
 def main():
-    send_telegram("🚀 Бот SHORT (KuCoin + Gate.io) запущен. Анализ каждые 10 минут.")
+    send_telegram("🚀 Бот SHORT (KuCoin + Gate.io + BingX) запущен. Анализ каждые 10 минут.")
     print("Бот запущен. Анализ SHORT сигналов.")
     while True:
         coins = get_all_usdt_pairs()
