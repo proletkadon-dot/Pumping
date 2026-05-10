@@ -1,78 +1,129 @@
-import asyncio
-import requests
-import time
-import math
+import logging
+from telegram.ext import Application, CommandHandler
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TELEGRAM_TOKEN = "8590220699:AAG6U7JoOH638P-LhA5Ow-Byr2cgh7thAAE"
-CHAT_ID = "694614387"  # теперь бот отвечает всем, но сигналы шлём только владельцу (укажите свой ID, если нужно)
-OWNER_CHAT_ID = "694614387"  # сюда сигналы будут приходить (можно и без ограничений)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-bot_enabled = True
+# === НАСТРОЙКИ ===
+TELEGRAM_TOKEN = "8590220699:AAG6U7JoOH638P-LhA5Ow-Byr2cgh7thAAE"  # Замените на токен от @BotFather
 
-# Параметры анализа (те же, но для краткости оставлю заглушки – вставьте полные функции)
-# ... (здесь должны быть все функции get_top_coins, get_klines, индикаторы, analyze_coin) ...
-# Для теста клавиатуры можно временно закомментировать фоновый анализ.
+# База данных сигналов (в реальном проекте используйте БД)
+SIGNALS_DATA = [
+    {
+        "symbol": "DRIFT",
+        "type": "SHORT",
+        "decision": "ШОРТ ПО РЫНКУ",
+        "confidence": "Сильный",
+        "reason": "Сильная зона сопротивления сверху, ждём откат вниз от диапазона $0.03806–$0.03923 (по 60+H4+M30, подтверждён на 3 ТФ)",
+        "timeframe": "60+H4+M30",
+        "rsi_5m": 80.0,
+        "rsi_1h": 58.6,
+        "volume": "1.52M",
+        "funding": "0.0050%",
+        "entry_type": "По рынку",
+        "entry_price": 0.03933,
+        "position_size": "1.0% депозита",
+        "leverage": "20x",
+        "tp_percent": -2.0,
+        "tp_price": 0.038543,
+        "fib_target": 0.03885,
+        "sl_price": 0.047196,
+        "risk_percent": "4.0%",
+        "remarks": [
+            "✅ Зона на старшем ТФ + реакция на M5 (REJECTION): Отбой от уровня (свеча с тенью) на M5",
+            "Уровень подтверждён на 60+H4+M30 (3 ТФ)",
+            "Отбой от уровня (свеча с тенью 69%), 2 св. назад"
+        ]
+    },
+    {
+        "symbol": "ALCH",
+        "type": "SHORT",
+        "decision": "ЖДАТЬ ЛИМИТНЫЙ ВХОД",
+        "confidence": "Лимитный ордер у зоны",
+        "reason": "Уровень, от которого цену несколько раз отбивали, ждём новую реакцию вниз от $0.09193 (~7 касаний) (по 60+H4, подтверждён на 2 ТФ)",
+        "timeframe": "60+H4",
+        "rsi_5m": 80.1,
+        "rsi_1h": 54.2,
+        "volume": "3.46M",
+        "funding": "0.0050%",
+        "entry_type": "Лимитный",
+        "entry_price": 0.09193,
+        "position_size": "1.0% депозита",
+        "leverage": "20x",
+        "distance_to_zone": "+10.0%",
+        "tp_percent": -2.0,
+        "tp_price": 0.090091,
+        "fib_target": 0.08155,
+        "sl_price": 0.110316,
+        "risk_percent": "4.0%",
+        "remarks": [
+            "Зона на старшем ТФ найдена, до неё +10.0% — лимитный ордер (реакцию проверить при подходе)",
+            "Уровень подтверждён на 60+H4 (2 ТФ)"
+        ]
+    }
+]
 
-# Обработчик команды /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [KeyboardButton("🟢 Включить"), KeyboardButton("🔴 Отключить")],
-        [KeyboardButton("🔄 Перезагрузить"), KeyboardButton("ℹ️ Статус")]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Управление ботом", reply_markup=reply_markup)
+def format_signal(signal_data):
+    """Форматирует сигнал в заданном стиле"""
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    color = "🔴" if signal_data["type"] == "SHORT" else "🟢"
 
-async def enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_enabled
-    bot_enabled = True
-    await update.message.reply_text("✅ Бот включён")
+    signal_text = f"[{now}] Gringo: {color} {signal_data['type']}: {signal_data['symbol']}\n"
+    signal_text += f"🎯 РЕШЕНИЕ: {'✅' if 'ПО РЫНКУ' in signal_data['decision'] else '⚠️'} {signal_data['decision']}\n"
+    signal_text += f"💭 Оценка: {signal_data['confidence']}\n\n"
 
-async def disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_enabled
-    bot_enabled = False
-    await update.message.reply_text("⛔ Бот отключён")
+    signal_text += "🔍 Анализ:\n"
+    signal_text += f"• RSI 5m: {signal_data['rsi_5m']}\n"
+    signal_text += f"• RSI 1h: {signal_data['rsi_1h']}\n"
+    signal_text += f"• Объём: {signal_data['volume']} ✅\n"
+    signal_text += f"• Фандинг: {signal_data['funding']} ✅\n\n"
 
-async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_enabled
-    bot_enabled = True
-    await update.message.reply_text("🔄 Бот перезагружен")
+    signal_text += f"📍 Причина входа: {signal_data['reason']}\n"
+    signal_text += f"Таймфрейм: {signal_data['timeframe']}\n\n"
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "включён" if bot_enabled else "отключён"
-    await update.message.reply_text(f"Статус: {text}")
+    signal_text += "💰 Точки входа:\n"
+    signal_text += f"• Вход: {signal_data['entry_type']} ({signal_data['entry_price']})\n"
+    signal_text += f"• Размер: {signal_data['position_size']}\n"
+    signal_text += f"• Плечо: {signal_data['leverage']}\n"
+    if 'distance_to_zone' in signal_data:
+        signal_text += f"• До зоны: {signal_data['distance_to_zone']}\n"
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "🟢 Включить":
-        await enable(update, context)
-    elif text == "🔴 Отключить":
-        await disable(update, context)
-    elif text == "🔄 Перезагрузить":
-        await restart(update, context)
-    elif text == "ℹ️ Статус":
-        await status(update, context)
+    signal_text += "\n🎯 Тейк-профит:\n"
+    signal_text += f"• TP {signal_data['tp_percent']}% ({signal_data['tp_price']}) — полное закрытие\n"
+    signal_text += f"• Цель отката (Фибо 0.5): {signal_data['fib_target']}\n\n"
 
-# Заглушка для анализа (закомментируйте или оставьте пустой)
-async def analysis_loop(app: Application):
-    while True:
-        await asyncio.sleep(60)
+    signal_text += "🛑 Стоп-лосс:\n"
+    signal_text += f"• SL: {signal_data['sl_price']} (+20% движ.)\n"
+    signal_text += f"• Оценка к депозиту: ~{signal_data['risk_percent']} (при 1.0% позиции и 20x)\n\n"
+
+    signal_text += "⚠️ Замечания:\n"
+    for remark in signal_data['remarks']:
+        signal_text += f"• {remark}\n"
+
+    return signal_text
+
+async def start(update, context):
+    await update.message.reply_text("Бот сигналов запущен! Используйте /signals для получения торговых сигналов.")
+
+
+async def get_signals(update, context):
+    for signal_data in SIGNALS_DATA:
+        signal_text = format_signal(signal_data)
+        await update.message.reply_text(signal_text)
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("enable", enable))
-    app.add_handler(CommandHandler("disable", disable))
-    app.add_handler(CommandHandler("restart", restart))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.Text(["🟢 Включить", "🔴 Отключить", "🔄 Перезагрузить", "ℹ️ Статус"]), handle_buttons))
-    # Запускаем фоновую задачу (пустую)
-    loop = asyncio.get_event_loop()
-    loop.create_task(analysis_loop(app))
-    # Запускаем polling
-    app.run_polling(drop_pending_updates=True)
+    try:
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("signals", get_signals))
+        print("Бот запущен. Ожидаю команд...")
+        application.run_polling()
+    except Exception as e:
+        logging.error(f"Ошибка запуска бота: {e}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
