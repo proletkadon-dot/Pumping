@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 TELEGRAM_TOKEN = "8590220699:AAG6U7JoOH638P-LhA5Ow-Byr2cgh7thAAE"
 CHAT_ID = "694614387"  # теперь бот отвечает всем, но сигналы шлём только владельцу (укажите свой ID, если нужно)
-OWNER_CHAT_ID = "ВАШ_ID"  # сюда сигналы будут приходить (можно и без ограничений)
+OWNER_CHAT_ID = "694614387"  # сюда сигналы будут приходить (можно и без ограничений)
 
 bot_enabled = True
 
