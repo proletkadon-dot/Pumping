@@ -9,8 +9,8 @@ TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
 MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
-MAX_24H_VOLUME_USDT = 200_000           # макс. объём $200k (низколиквидные)
-MIN_24H_VOLUME_USDT = 0                 # минимальный объём (можно 0)
+MAX_24H_VOLUME_USDT = 500_000           # макс. объём $200k (низколиквидные)
+MIN_24H_VOLUME_USDT = 30_000                 # минимальный объём (можно 0)
 TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
 # Пороги для SHORT сигнала
@@ -18,7 +18,7 @@ RSI_4H_MIN = 65
 RSI_1H_MIN = 65
 CHANGE_4H_MIN = 2.0
 FUNDING_MIN = 0.0
-VOLUME_24H_MIN = 5_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
+VOLUME_24H_MIN = 3_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
 # =================================
 
 def send_telegram(text):
@@ -52,7 +52,7 @@ def get_low_volume_coins():
                 coins.append(sym)
                 if len(coins) >= MAX_COINS:
                     break
-        print(f"Загружено {len(coins)} низколиквидных монет")
+        print(f"Загружено {len(coins)} монет")
         return coins
     except Exception as e:
         print(f"Ошибка получения списка монет: {e}")
@@ -197,7 +197,7 @@ def analyze_coin(symbol):
     return None
 
 def scan_market():
-    print(f"[{datetime.now()}] Начинаю анализ низколиквидных монет...")
+    print(f"[{datetime.now()}] Начинаю анализ монет...")
     coins = get_low_volume_coins()
     if not coins:
         send_telegram("⚠️ Не удалось получить список низколиквидных монет")
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     scan_market()
     # Запуск по расписанию (каждые 4 часа)
     schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. Анализ низколиквидных монет каждые 4 часа.")
+    print("Бот запущен. ")
     while True:
         schedule.run_pending()
         time.sleep(60)
