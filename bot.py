@@ -9,7 +9,7 @@ TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
 MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
-MAX_24H_VOLUME_USDT = 500_000           # макс. объём $200k (низколиквидные)
+MAX_24H_VOLUME_USDT = 500_000           # макс. объём $500k (низколиквидные)
 MIN_24H_VOLUME_USDT = 30_000                 # минимальный объём (можно 0)
 TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
@@ -21,6 +21,15 @@ FUNDING_MIN = 0.0
 VOLUME_24H_MIN = 3_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
 # =================================
 
+# Резервный список низколиквидных монет (используется, если Binance недоступен)
+FALLBACK_COINS = [
+    "RARE", "CLV", "DGB", "REI", "ALPACA", "FORTH", "BADGER", "NULS", "QKC",
+    "DOCK", "TOMO", "HARD", "SYS", "MIR", "RLC", "OXT", "CTK", "MDX", "FIRO",
+    "BURGER", "SANTOS", "MLN", "DIA", "WAN", "UNFI", "RGT", "VIDT", "QSP",
+    "DEGO", "LTO", "KMD", "LINA", "FRONT", "LOOM", "STPT", "ARK", "POLYX",
+    "BNX", "EPX", "SPELL", "TROY", "WTC", "WAVES", "CELO", "AERGO", "SUN"
+]
+
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -28,15 +37,18 @@ def send_telegram(text):
     except:
         pass
 
-# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ ----------
+# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ (ИСПРАВЛЕНО) ----------
 def get_low_volume_coins():
-    """Возвращает список монет с наименьшим 24h объёмом (отсортированы по возрастанию объёма)"""
+    """
+    Возвращает список монет с наименьшим 24h объёмом с Binance.
+    При ошибке использует резервный список FALLBACK_COINS.
+    """
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, timeout=15)  # увеличен таймаут
         data = r.json()
         if not isinstance(data, list):
-            return []
+            raise ValueError("Неверный формат данных")
         # Фильтруем USDT пары
         usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
         # Сортируем по объёму (quoteVolume) от меньшего к большему
@@ -52,11 +64,12 @@ def get_low_volume_coins():
                 coins.append(sym)
                 if len(coins) >= MAX_COINS:
                     break
-        print(f"Загружено {len(coins)} монет")
+        print(f"Загружено {len(coins)} монет с Binance")
         return coins
     except Exception as e:
-        print(f"Ошибка получения списка монет: {e}")
-        return []
+        print(f"Ошибка получения с Binance: {e}. Использую резервный список из {len(FALLBACK_COINS)} монет.")
+        # Если не удалось – берём готовый список (ограничиваем по MAX_COINS)
+        return FALLBACK_COINS[:MAX_COINS]
 
 # ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
 def get_klines(symbol, interval='5m', limit=100):
@@ -200,7 +213,7 @@ def scan_market():
     print(f"[{datetime.now()}] Начинаю анализ монет...")
     coins = get_low_volume_coins()
     if not coins:
-        send_telegram("⚠️ Не удалось получить список низколиквидных монет")
+        send_telegram("⚠️ Не удалось получить список низколиквидных монет даже из резервного списка.")
         return
     signals = []
     for idx, symbol in enumerate(coins):
@@ -211,7 +224,7 @@ def scan_market():
                 print(f"✅ Сигнал для {symbol}")
         except Exception as e:
             print(f"Ошибка {symbol}: {e}")
-        time.sleep(0.2)
+        time.sleep(0.3)  # небольшая задержка, чтобы не перегружать API
         if idx % 50 == 0:
             print(f"Обработано {idx}/{len(coins)} монет")
     for msg in signals:
@@ -224,7 +237,7 @@ if __name__ == "__main__":
     scan_market()
     # Запуск по расписанию (каждые 4 часа)
     schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. ")
+    print("Бот запущен. Ожидание следующего цикла...")
     while True:
         schedule.run_pending()
         time.sleep(60)
