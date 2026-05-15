@@ -1,230 +1,249 @@
-import requests
-import schedule
+import os
+import logging
 import time
-import math
 from datetime import datetime
+from typing import List, Dict, Optional
 
-# ========== НАСТРОЙКИ ==========
-TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-CHAT_ID = "694614387"
+import ccxt
+import pandas as pd
+import numpy as np
+import schedule
+from dotenv import load_dotenv
+from telegram import Bot
 
-MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
-MAX_24H_VOLUME_USDT = 500_000           # макс. объём $200k (низколиквидные)
-MIN_24H_VOLUME_USDT = 30_000                 # минимальный объём (можно 0)
-TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
+# -------------------- Настройка логирования --------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
-# Пороги для SHORT сигнала
-RSI_4H_MIN = 65
-RSI_1H_MIN = 65
-CHANGE_4H_MIN = 2.0
-FUNDING_MIN = 0.0
-VOLUME_24H_MIN = 3_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
-# =================================
+load_dotenv()
 
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# -------------------- Конфигурация --------------------
+class Config:
+    TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+    TELEGRAM_CHAT_ID=-1001234567890
+
+    EXCHANGE_ID = "binance"
+    TIMEFRAME = "1h"
+    SCAN_INTERVAL_MIN = 15
+    SYMBOLS = []  # оставить пустым – будут топ-50 USDT-пар
+
+    RSI_OVERBOUGHT = 70
+    RSI_OVERSOLD = 30
+    EMA_FAST = 9
+    EMA_SLOW = 21
+    VOLUME_MA_PERIOD = 20
+    ATR_PERIOD = 14
+    TP_ATR_MULT = 3.0
+    SL_ATR_MULT = 1.5
+
+# -------------------- Самодельные индикаторы --------------------
+def compute_ema(series: pd.Series, period: int) -> pd.Series:
+    """Экспоненциальная скользящая средняя."""
+    return series.ewm(span=period, adjust=False).mean()
+
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """RSI (индекс относительной силы)."""
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    # Используем SMA для первых period значений, затем EWM для остальных
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Средний истинный диапазон (ATR)."""
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    # Первые period-1 значений будут NaN, это нормально
+    return atr
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавить все индикаторы в DataFrame."""
+    if df.empty:
+        return df
+    df["ema_fast"] = compute_ema(df["close"], Config.EMA_FAST)
+    df["ema_slow"] = compute_ema(df["close"], Config.EMA_SLOW)
+    df["rsi"] = compute_rsi(df["close"], 14)
+    df["atr"] = compute_atr(df, Config.ATR_PERIOD)
+    df["volume_ma"] = df["volume"].rolling(window=Config.VOLUME_MA_PERIOD).mean()
+    return df
+
+# -------------------- Клиент биржи --------------------
+exchange = ccxt.binance({
+    "enableRateLimit": True,
+    "options": {"defaultType": "spot"}
+})
+
+def fetch_top_symbols(limit: int = 50) -> List[str]:
+    """Топ-USDT пар по объёму за 24ч."""
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
-    except:
-        pass
-
-# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ ----------
-def get_low_volume_coins():
-    """Возвращает список монет с наименьшим 24h объёмом (отсортированы по возрастанию объёма)"""
-    try:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=15)
-        data = r.json()
-        if not isinstance(data, list):
-            return []
-        # Фильтруем USDT пары
-        usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
-        # Сортируем по объёму (quoteVolume) от меньшего к большему
-        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']))
-        coins = []
-        for pair in usdt_pairs:
-            sym = pair['symbol'].replace('USDT', '')
-            # Исключаем BTC, ETH, стейблкоины
-            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
-                continue
-            vol = float(pair['quoteVolume'])
-            if MIN_24H_VOLUME_USDT <= vol <= MAX_24H_VOLUME_USDT:
-                coins.append(sym)
-                if len(coins) >= MAX_COINS:
-                    break
-        print(f"Загружено {len(coins)} монет")
-        return coins
+        tickers = exchange.fetch_tickers()
+        usdt_pairs = {s: t for s, t in tickers.items() if s.endswith("/USDT")}
+        sorted_pairs = sorted(usdt_pairs.items(), key=lambda x: x[1].get("quoteVolume", 0), reverse=True)
+        return [s for s, _ in sorted_pairs[:limit]]
     except Exception as e:
-        print(f"Ошибка получения списка монет: {e}")
+        logger.error(f"Ошибка получения тикеров: {e}")
         return []
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
-def get_klines(symbol, interval='5m', limit=100):
-    # Bybit
-    interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
-    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
+def fetch_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 100) -> pd.DataFrame:
+    """Загрузить свечные данные."""
     try:
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-            klines = data['result']['list']
-            closes = [float(k[4]) for k in klines]
-            closes.reverse()
-            return closes
-    except:
-        pass
-    # KuCoin
-    try:
-        url = f"https://api.kucoin.com/api/v1/market/candles?type={interval}&symbol={symbol}-USDT&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data.get('code') == '200000' and data.get('data'):
-            return [float(c[2]) for c in data['data']]
-    except:
-        pass
-    # Binance
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            return [float(c[4]) for c in data]
-    except:
-        pass
-    return []
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        df.columns = [c.lower() for c in df.columns]
+        return df
+    except Exception as e:
+        logger.error(f"Ошибка загрузки {symbol}: {e}")
+        return pd.DataFrame()
 
-def calculate_rsi(closes, period=14):
-    if len(closes) < period+1:
-        return None
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(diff if diff>0 else 0)
-        losses.append(-diff if diff<0 else 0)
-    avg_gain = sum(gains[-period:])/period
-    avg_loss = sum(losses[-period:])/period
-    if avg_loss == 0:
-        return 100
-    return round(100 - 100/(1+avg_gain/avg_loss), 2)
+# -------------------- Стратегии --------------------
+class BaseStrategy:
+    name = "Base"
+    def analyze(self, df: pd.DataFrame, symbol: str) -> Optional[Dict]:
+        raise NotImplementedError
 
-def get_price_change(symbol, interval, back_minutes):
-    closes = get_klines(symbol, interval, 2)
-    if len(closes) < 2:
-        return None
-    return (closes[-1] - closes[-2]) / closes[-2] * 100
-
-def get_24h_stats(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
-    try:
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data['priceChangePercent']), float(data['quoteVolume'])
-    except:
-        return None, None
-
-def get_funding(symbol):
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data.get('lastFundingRate', 0)) * 100
-    except:
-        return None
-
-def get_realtime_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-    try:
-        r = requests.get(url, timeout=5)
-        return float(r.json()['price'])
-    except:
-        return None
-
-def analyze_coin(symbol):
-    # RSI
-    rsis = {}
-    for tf in TIMEFRAMES_RSI:
-        closes = get_klines(symbol, tf, 50)
-        if not closes:
+class RSIOverheatStrategy(BaseStrategy):
+    name = "RSI Overheat"
+    def analyze(self, df: pd.DataFrame, symbol: str) -> Optional[Dict]:
+        if df.empty or "rsi" not in df.columns:
             return None
-        rsis[tf] = calculate_rsi(closes)
-        if rsis[tf] is None:
+        last_rsi = df["rsi"].iloc[-1]
+        if pd.isna(last_rsi):
+            return None
+        signal = None
+        if last_rsi > Config.RSI_OVERBOUGHT:
+            signal = {"type": "OVERBOUGHT", "rsi": round(last_rsi, 2)}
+        elif last_rsi < Config.RSI_OVERSOLD:
+            signal = {"type": "OVERSOLD", "rsi": round(last_rsi, 2)}
+        if signal:
+            signal["symbol"] = symbol
+            signal["strategy"] = self.name
+            signal["price"] = df["close"].iloc[-1]
+        return signal
+
+class AdvancedSignalStrategy(BaseStrategy):
+    name = "Advanced TP/SL"
+    def analyze(self, df: pd.DataFrame, symbol: str) -> Optional[Dict]:
+        if df.empty or len(df) < 2:
+            return None
+        prev = df.iloc[-2]
+        last = df.iloc[-1]
+        # Проверка наличия индикаторов
+        if any(pd.isna(x) for x in [last["ema_fast"], last["ema_slow"], last["rsi"], last["atr"], last["volume_ma"]]):
             return None
 
-    # Изменения
-    change_24h, volume_24h = get_24h_stats(symbol)
-    if change_24h is None:
+        cross_up = (prev["ema_fast"] <= prev["ema_slow"]) and (last["ema_fast"] > last["ema_slow"])
+        rsi_rising = last["rsi"] > 40 and prev["rsi"] <= 40
+        high_volume = last["volume"] > last["volume_ma"]
+
+        if cross_up and rsi_rising and high_volume:
+            entry = last["close"]
+            atr = last["atr"]
+            sl = entry - Config.SL_ATR_MULT * atr
+            tp = entry + Config.TP_ATR_MULT * atr
+            return {
+                "symbol": symbol, "strategy": self.name, "type": "BUY",
+                "entry": round(entry, 6), "sl": round(sl, 6), "tp": round(tp, 6),
+                "rsi": round(last["rsi"], 2),
+                "volume_ratio": round(last["volume"] / last["volume_ma"], 2) if last["volume_ma"] else 0
+            }
+
+        cross_down = (prev["ema_fast"] >= prev["ema_slow"]) and (last["ema_fast"] < last["ema_slow"])
+        rsi_falling = last["rsi"] < 60 and prev["rsi"] >= 60
+        if cross_down and rsi_falling and high_volume:
+            entry = last["close"]
+            atr = last["atr"]
+            sl = entry + Config.SL_ATR_MULT * atr
+            tp = entry - Config.TP_ATR_MULT * atr
+            return {
+                "symbol": symbol, "strategy": self.name, "type": "SELL",
+                "entry": round(entry, 6), "sl": round(sl, 6), "tp": round(tp, 6),
+                "rsi": round(last["rsi"], 2),
+                "volume_ratio": round(last["volume"] / last["volume_ma"], 2) if last["volume_ma"] else 0
+            }
         return None
-    change_15m = get_price_change(symbol, '15m', 15) or 0
-    change_1h = get_price_change(symbol, '1h', 60) or 0
-    change_4h = get_price_change(symbol, '4h', 240) or 0
-    funding = get_funding(symbol)
 
-    # Условия для SHORT сигнала
-    if (rsis['4h'] >= RSI_4H_MIN and rsis['1h'] >= RSI_1H_MIN and
-        change_4h >= CHANGE_4H_MIN and funding is not None and funding >= FUNDING_MIN and
-        volume_24h >= VOLUME_24H_MIN):
-
-        reasons = []
-        if rsis['4h'] >= RSI_4H_MIN:
-            reasons.append(f"RSI 4h = {rsis['4h']} (выше {RSI_4H_MIN}) – сильная перекупленность")
-        if rsis['1h'] >= RSI_1H_MIN:
-            reasons.append(f"RSI 1h = {rsis['1h']} (выше {RSI_1H_MIN}) – подтверждение перекупленности")
-        if change_4h >= CHANGE_4H_MIN:
-            reasons.append(f"рост за 4ч = {change_4h:.2f}% (выше {CHANGE_4H_MIN}%) – импульс исчерпан")
-        if funding >= FUNDING_MIN:
-            reasons.append(f"фандинг = {funding:.2f}% – лонгисты платят шортистам")
-        if volume_24h >= VOLUME_24H_MIN:
-            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – достаточно ликвидности для сделки")
-        explanation = " ".join(reasons)
-
-        real_price = get_realtime_price(symbol)
-        if real_price is None:
-            return None
-
-        msg = f"""
-🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | {real_price:.4f}
-
-<b>RSI:</b> 5m {rsis['5m']} | 15m {rsis['15m']} | 1h {rsis['1h']} | 4h {rsis['4h']}
-<b>Изменение:</b> 24h {change_24h:+.2f}% | 15m {change_15m:+.2f}% | 1h {change_1h:+.2f}% | 4h {change_4h:+.2f}%
-<b>Объём 24h:</b> {volume_24h/1e6:.2f}M
-<b>Фандинг:</b> {funding:+.4f}% ✅
-
-💡 <b>Логическое обоснование:</b> {explanation}. Совокупность факторов указывает на высокую вероятность коррекции вниз.
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        return msg
-    return None
-
-def scan_market():
-    print(f"[{datetime.now()}] Начинаю анализ монет...")
-    coins = get_low_volume_coins()
-    if not coins:
-        send_telegram("⚠️ Не удалось получить список низколиквидных монет")
-        return
-    signals = []
-    for idx, symbol in enumerate(coins):
+# -------------------- Telegram-уведомления --------------------
+class TelegramNotifier:
+    def __init__(self):
+        if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_CHAT_ID:
+            raise ValueError("TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID должны быть заданы в .env")
+        self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
+        self.chat_id = Config.TELEGRAM_CHAT_ID
+    def send_message(self, text: str, parse_mode: str = "HTML"):
         try:
-            msg = analyze_coin(symbol)
-            if msg:
-                signals.append(msg)
-                print(f"✅ Сигнал для {symbol}")
+            self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=parse_mode)
         except Exception as e:
-            print(f"Ошибка {symbol}: {e}")
-        time.sleep(0.2)
-        if idx % 50 == 0:
-            print(f"Обработано {idx}/{len(coins)} монет")
-    for msg in signals:
-        send_telegram(msg)
-        time.sleep(2)
-    print(f"Готово. Сигналов: {len(signals)}")
+            logger.error(f"Ошибка отправки в Telegram: {e}")
 
+def format_signal_message(signal: Dict) -> str:
+    if signal["strategy"] == "RSI Overheat":
+        t = signal["type"]
+        emoji = "🔴" if t == "OVERBOUGHT" else "🟢"
+        return (
+            f"{emoji} <b>RSI Alert: {signal['symbol']}</b>\n"
+            f"Тип: {t}\nЦена: {signal['price']:.6f}\nRSI: {signal['rsi']}\n"
+            f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+    elif signal["strategy"] == "Advanced TP/SL":
+        direction = "📈 LONG" if signal["type"] == "BUY" else "📉 SHORT"
+        return (
+            f"{direction} <b>Сигнал: {signal['symbol']}</b>\n"
+            f"Тип: {signal['type']}\nВход: {signal['entry']:.6f}\n"
+            f"🎯 TP: {signal['tp']:.6f}\n🛑 SL: {signal['sl']:.6f}\n"
+            f"RSI: {signal['rsi']}\nОбъём/средний: {signal['volume_ratio']}x\n"
+            f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+    return ""
+
+# -------------------- Главный сканер --------------------
+class CryptoScanner:
+    def __init__(self):
+        self.notifier = TelegramNotifier()
+        self.strategies = [RSIOverheatStrategy(), AdvancedSignalStrategy()]
+        self.symbols = Config.SYMBOLS if Config.SYMBOLS else fetch_top_symbols(50)
+        if not self.symbols:
+            logger.error("Не удалось получить список монет.")
+        else:
+            logger.info(f"Загружено {len(self.symbols)} символов для мониторинга.")
+
+    def run_once(self):
+        logger.info("Запуск сканирования...")
+        for symbol in self.symbols:
+            df = fetch_ohlcv(symbol, Config.TIMEFRAME, limit=100)
+            if df.empty:
+                continue
+            df = add_indicators(df)
+            for strategy in self.strategies:
+                signal = strategy.analyze(df, symbol)
+                if signal:
+                    logger.info(f"Сигнал: {signal}")
+                    msg = format_signal_message(signal)
+                    self.notifier.send_message(msg)
+
+    def start(self):
+        schedule.every(Config.SCAN_INTERVAL_MIN).minutes.do(self.run_once)
+        logger.info(f"Бот запущен. Интервал: {Config.SCAN_INTERVAL_MIN} мин.")
+        self.run_once()
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+
+# -------------------- Точка входа --------------------
 if __name__ == "__main__":
-    # Первый запуск сразу
-    scan_market()
-    # Запуск по расписанию (каждые 4 часа)
-    schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. ")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    scanner = CryptoScanner()
+    scanner.start()
