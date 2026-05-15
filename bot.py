@@ -23,8 +23,8 @@ load_dotenv()
 
 # -------------------- Конфигурация --------------------
 class Config:
-    TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-    TELEGRAM_CHAT_ID=-1001234567890
+    TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
+    CHAT_ID = "694614387"
 
     EXCHANGE_ID = "binance"
     TIMEFRAME = "1h"
