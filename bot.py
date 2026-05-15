@@ -1,25 +1,16 @@
 import requests
 import time
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
-MAX_PAIRS = 200                     # максимум монет для анализа
-MIN_24H_VOLUME_USDT = 200_000       # мин. объём $200k (не используется в списках, но оставлено)
-CHECK_INTERVAL = 600                # 10 минут
-LOOKBACK_CANDLES = 500              # сколько 5m свечей для уровней
-MIN_TOUCHES = 2                     # минимальное количество касаний
-LEVERAGE = 20
-RISK_PERCENT = 1.0
-TP_PERCENT = 2.0
-SL_OFFSET_PERCENT = 0.5
-LIMIT_OFFSET_PERCENT = 0.2
-TIMEFRAMES = ['5', '15', '30', '60', '240']   # минуты
-DISTANCE_TO_RESISTANCE_PERCENT = 2.0          # цена ближе 2% к сопротивлению
-RSI_MIN_FOR_SHORT = 35                         # RSI не ниже 35
+# Список монет (можно заменить на топ по объёму)
+SYMBOLS = ["CGPT", "SOL", "ETH", "BTC", "XRP", "DOGE", "ADA", "MATIC", "DOT", "AVAX"]
+
+CHECK_INTERVAL = 1800  # 30 минут
 # =================================
 
 def send_telegram(text):
@@ -29,190 +20,20 @@ def send_telegram(text):
     except:
         pass
 
-# ---------- ПОЛУЧЕНИЕ СПИСКА МОНЕТ (KuCoin, Gate.io, BingX) ----------
-def get_all_usdt_pairs():
-    # 1. KuCoin
+# ---------- ПОЛУЧЕНИЕ СВЕЧЕЙ ----------
+def get_klines(symbol, interval, limit=100):
+    """interval: 5m, 15m, 1h, 4h"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
-        url = "https://api.kucoin.com/api/v1/symbols"
         r = requests.get(url, timeout=10)
         data = r.json()
-        if data['code'] == '200000':
-            symbols = [s['symbol'] for s in data['data'] if s['symbol'].endswith('-USDT')]
-            coins = []
-            for sym in symbols[:MAX_PAIRS]:
-                base = sym.replace('-USDT', '')
-                if base in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD']:
-                    continue
-                coins.append({'symbol': base, 'volume': 0})
-            if coins:
-                print(f"Список монет с KuCoin: {len(coins)}")
-                return coins[:MAX_PAIRS]
-    except Exception as e:
-        print(f"KuCoin список не удался: {e}")
-    
-    # 2. Gate.io
-    try:
-        url = "https://api.gateio.ws/api/v4/spot/currency_pairs"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        symbols = [p['id'] for p in data if p['id'].endswith('_USDT')]
-        coins = []
-        for sym in symbols[:MAX_PAIRS]:
-            base = sym.replace('_USDT', '')
-            if base in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD']:
-                continue
-            coins.append({'symbol': base, 'volume': 0})
-        if coins:
-            print(f"Список монет с Gate.io: {len(coins)}")
-            return coins[:MAX_PAIRS]
-    except Exception as e:
-        print(f"Gate.io список не удался: {e}")
-    
-    # 3. BingX
-    try:
-        url = "https://open-api.bingx.com/openApi/spot/v1/common/symbols"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if data.get('code') == 0:
-            symbols = [s['symbol'] for s in data['data'] if s['symbol'].endswith('USDT')]
-            coins = []
-            for sym in symbols[:MAX_PAIRS]:
-                base = sym.replace('USDT', '')
-                if base in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD']:
-                    continue
-                coins.append({'symbol': base, 'volume': 0})
-            if coins:
-                print(f"Список монет с BingX: {len(coins)}")
-                return coins[:MAX_PAIRS]
-    except Exception as e:
-        print(f"BingX список не удался: {e}")
-    
-    # Резервный список
-    fallback = ["SOL","XRP","ADA","DOGE","MATIC","DOT","AVAX","LINK","LTC","NEAR","ATOM","FIL","VET","ALGO","ICP","FTM","SAND","MANA","ENJ","CHZ","AAVE","EOS","TRX","XLM","NEO","PEPE","WIF","FLOKI","TON","OP","ARB","SUI","APT","INJ","SEI","TIA","ONDO","STRK","ETHFI"]
-    print(f"Использую резервный список из {len(fallback)} монет")
-    return [{'symbol': s, 'volume': 0} for s in fallback[:MAX_PAIRS]]
-
-# ---------- ПОЛУЧЕНИЕ КЛИНОВ (5m) с трёх бирж + BingX ----------
-def get_klines(symbol, interval_minutes=5, limit=500):
-    # 1. KuCoin
-    try:
-        url = f"https://api.kucoin.com/api/v1/market/candles?type={interval_minutes}min&symbol={symbol}-USDT&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data['code'] == '200000' and data['data']:
-            candles = data['data']
-            closes = [float(c[2]) for c in candles]
-            highs = [float(c[1]) for c in candles]
-            lows = [float(c[0]) for c in candles]
-            volumes = [float(c[5]) for c in candles]
-            return closes, highs, lows, volumes
+        closes = [float(c[4]) for c in data]
+        return closes
     except:
-        pass
-    
-    # 2. Gate.io
-    try:
-        url = f"https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={symbol}_USDT&interval={interval_minutes}m&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            closes = [float(c[2]) for c in data]
-            highs = [float(c[3]) for c in data]
-            lows = [float(c[4]) for c in data]
-            volumes = [float(c[5]) for c in data]
-            return closes, highs, lows, volumes
-    except:
-        pass
-    
-    # 3. BingX
-    try:
-        interval_str = f"{interval_minutes}m"
-        url = f"https://open-api.bingx.com/openApi/spot/v1/market/kline?symbol={symbol}-USDT&interval={interval_str}&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data.get('code') == 0 and data.get('data'):
-            candles = data['data']
-            # BingX возвращает: [open, high, low, close, volume, ...]
-            closes = [float(c[3]) for c in candles]
-            highs = [float(c[1]) for c in candles]
-            lows = [float(c[2]) for c in candles]
-            volumes = [float(c[4]) for c in candles]
-            return closes, highs, lows, volumes
-    except:
-        pass
-    
-    # 4. Binance (на всякий случай)
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval_minutes}m&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            closes = [float(c[4]) for c in data]
-            highs = [float(c[2]) for c in data]
-            lows = [float(c[3]) for c in data]
-            volumes = [float(c[5]) for c in data]
-            return closes, highs, lows, volumes
-    except:
-        pass
-    
-    print(f"Не удалось получить свечи для {symbol}")
-    return [], [], [], []
+        return []
 
-# ---------- ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (анализ, уровни, индикаторы) без изменений ----------
-# (В целях экономии места я не копирую их сюда, но они должны быть идентичны предыдущей версии.
-#  Ниже я приведу полный код без сокращений, чтобы вы могли скопировать его целиком.)
-
-def find_support_resistance(highs, lows, current_price, lookback=200):
-    highs_seg = highs[-lookback:]
-    lows_seg = lows[-lookback:]
-    supports = []
-    resistances = []
-    for i in range(2, len(lows_seg)-2):
-        if lows_seg[i] <= lows_seg[i-1] and lows_seg[i] <= lows_seg[i-2] and \
-           lows_seg[i] <= lows_seg[i+1] and lows_seg[i] <= lows_seg[i+2]:
-            supports.append(lows_seg[i])
-    for i in range(2, len(highs_seg)-2):
-        if highs_seg[i] >= highs_seg[i-1] and highs_seg[i] >= highs_seg[i-2] and \
-           highs_seg[i] >= highs_seg[i+1] and highs_seg[i] >= highs_seg[i+2]:
-            resistances.append(highs_seg[i])
-    supports = sorted(set(supports))
-    resistances = sorted(set(resistances))
-    nearest_support = max([s for s in supports if s < current_price], default=None)
-    nearest_resistance = min([r for r in resistances if r > current_price], default=None)
-    return nearest_support, nearest_resistance
-
-def calculate_fibo_levels(highs, lows, closes):
-    if len(closes) < 100:
-        return {}
-    max_price = max(closes[-100:])
-    min_price = min(closes[-100:])
-    idx_max = len(closes) - 1 - closes[::-1].index(max_price)
-    idx_min = len(closes) - 1 - closes[::-1].index(min_price)
-    if idx_max > idx_min:
-        start, end = min_price, max_price
-    else:
-        start, end = max_price, min_price
-    diff = end - start
-    levels = {}
-    for fib in [0.236, 0.382, 0.5, 0.618, 0.786]:
-        levels[fib] = start + diff * fib
-    return levels
-
-def count_touches(symbol, level_price, interval_min, lookback_days=2):
-    intervals = {'5': 12*24, '15': 4*24, '30': 2*24, '60': 24, '240': 6}
-    limit = intervals.get(str(interval_min), 100) * lookback_days
-    _, highs, lows, _ = get_klines(symbol, interval_minutes=interval_min, limit=limit)
-    if not highs:
-        return 0
-    touches = 0
-    for i in range(len(highs)):
-        if abs(highs[i] - level_price) / level_price * 100 < 0.3:
-            touches += 1
-        if abs(lows[i] - level_price) / level_price * 100 < 0.3:
-            touches += 1
-    return touches
-
-def get_rsi(symbol, interval_min, period=14):
-    closes, _, _, _ = get_klines(symbol, interval_minutes=interval_min, limit=period+10)
+# ---------- RSI ----------
+def calculate_rsi(closes, period=14):
     if len(closes) < period+1:
         return None
     gains, losses = [], []
@@ -224,153 +45,200 @@ def get_rsi(symbol, interval_min, period=14):
     avg_loss = sum(losses[-period:])/period
     if avg_loss == 0:
         return 100
-    return 100 - 100/(1+avg_gain/avg_loss)
+    return round(100 - 100/(1+avg_gain/avg_loss), 2)
 
-def get_funding(symbol):
-    # Пробуем KuCoin фьючерсы
+# ---------- ИЗМЕНЕНИЕ ЦЕНЫ ЗА ПЕРИОД ----------
+def get_price_change(symbol, interval, minutes_ago):
+    """Изменение цены за указанное количество минут (используя последнюю свечу)"""
+    closes = get_klines(symbol, interval, limit=2)
+    if len(closes) < 2:
+        return None
+    current = closes[-1]
+    # Для интервалов 5m, 15m, 1h, 4h нужно преобразовать minutes_ago в количество свечей назад
+    # Упрощённо: для 15м изменения берём свечу 15m назад
+    interval_map = {'5m': 5, '15m': 15, '1h': 60, '4h': 240}
+    if interval not in interval_map:
+        return None
+    minutes = interval_map[interval]
+    # Берём свечу, которая была примерно minutes_ago минут назад
+    bars_ago = int(minutes_ago / minutes) if minutes_ago % minutes == 0 else int(minutes_ago / minutes) + 1
+    if bars_ago >= len(closes):
+        return None
+    prev = closes[-1 - bars_ago]
+    return (current - prev) / prev * 100
+
+# ---------- 24H ДАННЫЕ ----------
+def get_24h_stats(symbol):
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
     try:
-        url = f"https://api.kucoin.com/api/v1/contracts/{symbol}-USDT"
         r = requests.get(url, timeout=5)
         data = r.json()
-        if data['code'] == '200000':
-            return float(data['data']['fundingRate']) * 100
+        return float(data['priceChangePercent']), float(data['quoteVolume'])
+    except:
+        return None, None
+
+# ---------- КАПИТАЛИЗАЦИЯ (CoinGecko) ----------
+def get_market_cap(symbol):
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={symbol.lower()}&order=market_cap_desc&per_page=1&page=1&sparkline=false"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        data = r.json()
+        if data and isinstance(data, list) and 'market_cap' in data[0]:
+            return data[0]['market_cap']
     except:
         pass
     return None
 
-def get_24h_volume(symbol):
-    # Пробуем KuCoin
+# ---------- ФАНДИНГ И OI (Binance Futures) ----------
+def get_funding_and_oi(symbol):
     try:
-        url = f"https://api.kucoin.com/api/v1/market/stats?symbol={symbol}-USDT"
+        url_f = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
+        r_f = requests.get(url_f, timeout=5)
+        funding = float(r_f.json().get('lastFundingRate', 0)) * 100
+        url_oi = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}USDT"
+        r_oi = requests.get(url_oi, timeout=5)
+        oi = float(r_oi.json().get('openInterest', 0))
+        # Изменение OI за 15м (нужно запрашивать историю, для упрощения пропустим)
+        return funding, oi, None  # вместо None можно поставить изменение, если реализовать
+    except:
+        return None, None, None
+
+# ---------- СТАКАН ОРДЕРОВ (спот) ----------
+def get_orderbook(symbol, limit=500):
+    url = f"https://api.binance.com/api/v3/depth?symbol={symbol}USDT&limit={limit}"
+    try:
         r = requests.get(url, timeout=5)
         data = r.json()
-        if data['code'] == '200000':
-            return float(data['data']['volValue'])
+        bids = [[float(x[0]), float(x[1])] for x in data['bids']]
+        asks = [[float(x[0]), float(x[1])] for x in data['asks']]
+        return bids, asks
     except:
-        pass
-    return 0
+        return [], []
 
-def analyze_coin(symbol):
-    closes, highs, lows, _ = get_klines(symbol, 5, LOOKBACK_CANDLES)
-    if len(closes) < 300:
+def analyze_orderbook(bids, asks, current_price):
+    levels = [0.2, 0.5, 1.0, 5.0, 10.0]
+    bid_dens = {lev: 0 for lev in levels}
+    ask_dens = {lev: 0 for lev in levels}
+    for price, qty in bids:
+        if price == 0: continue
+        perc = (current_price - price) / current_price * 100
+        for lev in levels:
+            if perc <= lev:
+                bid_dens[lev] += qty
+                break
+    for price, qty in asks:
+        if price == 0: continue
+        perc = (price - current_price) / current_price * 100
+        for lev in levels:
+            if perc <= lev:
+                ask_dens[lev] += qty
+                break
+    # Крупные спот-лимитики (самый большой ордер на покупку/продажу в пределах 2%)
+    large_bid = max([(price, qty) for price, qty in bids if (current_price - price)/current_price*100 <= 2], key=lambda x: x[1], default=(0,0))
+    large_ask = max([(price, qty) for price, qty in asks if (price - current_price)/current_price*100 <= 2], key=lambda x: x[1], default=(0,0))
+    return bid_dens, ask_dens, large_bid, large_ask
+
+# ---------- ОСНОВНОЙ АНАЛИЗ ----------
+def analyze_symbol(symbol):
+    # Текущая цена
+    url_price = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+    try:
+        r = requests.get(url_price, timeout=5)
+        price = float(r.json()['price'])
+    except:
         return None
-    current_price = closes[-1]
-    
-    support, resistance = find_support_resistance(highs, lows, current_price, lookback=200)
-    if not resistance:
+
+    # RSI на 5m, 15m, 1h, 4h
+    rsi_5m = calculate_rsi(get_klines(symbol, '5m', 50), 14)
+    rsi_15m = calculate_rsi(get_klines(symbol, '15m', 50), 14)
+    rsi_1h = calculate_rsi(get_klines(symbol, '1h', 50), 14)
+    rsi_4h = calculate_rsi(get_klines(symbol, '4h', 50), 14)
+    if any(x is None for x in [rsi_5m, rsi_15m, rsi_1h, rsi_4h]):
         return None
-    dist_to_res = (resistance - current_price) / current_price * 100
-    if dist_to_res > DISTANCE_TO_RESISTANCE_PERCENT:
+
+    # Изменение цены за 24ч, 15м, 1ч, 4ч
+    change_24h, volume_24h = get_24h_stats(symbol)
+    change_15m = get_price_change(symbol, '15m', 15)
+    change_1h = get_price_change(symbol, '1h', 60)
+    change_4h = get_price_change(symbol, '4h', 240)
+    if change_24h is None or volume_24h is None:
         return None
-    
-    fibo = calculate_fibo_levels(highs, lows, closes)
-    level_price = resistance
-    level_type = 'resistance'
-    fibo_level = None
-    for f, val in fibo.items():
-        if abs(level_price - val) / level_price * 100 < 0.5 and (f == 0.236 or f == 0.382):
-            fibo_level = f
-            break
-    
-    # Подтверждение таймфреймов
-    confirmed_tfs = []
-    for tf in TIMEFRAMES:
-        touches = count_touches(symbol, level_price, int(tf), lookback_days=2)
-        if touches >= MIN_TOUCHES:
-            confirmed_tfs.append(f"{tf}m")
-    if len(confirmed_tfs) < 2:
-        return None
-    
-    rsi5 = get_rsi(symbol, 5)
-    rsi60 = get_rsi(symbol, 60)
-    if rsi5 is None or rsi60 is None:
-        return None
-    if rsi5 < RSI_MIN_FOR_SHORT:
-        return None
-    
-    volume24h = get_24h_volume(symbol)
-    volume_status = "🟢" if volume24h > 50_000_000 else "🟡" if volume24h > 10_000_000 else "🔴"
-    funding = get_funding(symbol)
-    funding_str = f"{funding:.4f}%" if funding is not None else "нет данных"
-    funding_ok = (funding and funding > 0)
-    
-    entry_price = level_price * (1 - LIMIT_OFFSET_PERCENT / 100)
-    tp1 = entry_price * (1 - TP_PERCENT / 100)
-    tp2_candidates = []
-    if support and support < entry_price:
-        tp2_candidates.append(support)
-    for f, val in fibo.items():
-        if val < entry_price and (f == 0.5 or f == 0.618):
-            tp2_candidates.append(val)
-    tp2 = max(tp2_candidates) if tp2_candidates else entry_price * 0.97
-    sl_price = level_price * (1 + SL_OFFSET_PERCENT / 100)
-    sl_percent = (sl_price - entry_price) / entry_price * 100
-    risk_to_deposit = sl_percent * LEVERAGE * (RISK_PERCENT / 100)
-    
-    side_emoji = "🔴 SHORT"
-    level_desc = f"{level_price:.6f} ({level_type}"
-    if fibo_level:
-        level_desc += f", Фибо {fibo_level}"
-    level_desc += ")"
-    touches_info = f"~{count_touches(symbol, level_price, 5, 2)} касаний"
-    
+
+    # Капитализация (опционально)
+    cap = get_market_cap(symbol)
+    cap_str = f"{cap/1e9:.2f}B" if cap and cap > 1e9 else f"{cap/1e6:.2f}M" if cap else "н/д"
+
+    # Фандинг и OI
+    funding, oi, oi_change = get_funding_and_oi(symbol)
+    funding_str = f"{funding:+.4f}%" if funding is not None else "нет данных"
+    oi_str = f"{oi/1e6:.2f}M" if oi else "н/д"
+    oi_change_str = f"{oi_change:+.2f}%" if oi_change else "?"
+
+    # Стакан
+    bids, asks = get_orderbook(symbol, limit=500)
+    bid_dens, ask_dens, large_bid, large_ask = analyze_orderbook(bids, asks, price)
+
+    # Формирование сообщения по шаблону
     msg = f"""
-{side_emoji}: {symbol}
+🔻 <b>ОБНАРУЖЕН SHORT-СИГНАЛ</b>
+<b>{symbol} | {price:.4f}</b>
 
-🎯 РЕШЕНИЕ: ⚠️ ЖДАТЬ ЛИМИТНЫЙ ВХОД
-💭 Оценка: Лимитный ордер у зоны
+Таймфрейм графика: 4ч
 
-🔍 Анализ:
-• RSI 5m: {rsi5:.1f}
-• RSI 1h: {rsi60:.1f}
-• Объём 24h: {volume24h/1_000_000:.2f}M {volume_status}
-• Фандинг: {funding_str} {'✅' if funding_ok else ''}
+<b>RSI:</b>  
+5m {rsi_5m} | 15m {rsi_15m}  
+1h {rsi_1h} | 4h {rsi_4h}  
 
-📍 Причина входа: Уровень {level_desc}, {touches_info} (по {','.join(confirmed_tfs[:4])}, подтверждён на {len(confirmed_tfs)} ТФ)
-Таймфрейм: {'+'.join(confirmed_tfs[:4])}
+---
 
-💰 Точки входа:
-• Вход: Лимитный {entry_price:.6f}
-• Размер: {RISK_PERCENT:.1f}% депозита
-• Плечо: {LEVERAGE}x
-• До зоны: {abs((entry_price - level_price)/level_price*100):.2f}%
+### Рынок:
+24ч {change_24h:+.2f}% | 15м {change_15m:+.2f}%  
+1ч {change_1h:+.2f}% | 4ч {change_4h:+.2f}%  
+Объем 24ч {volume_24h/1e6:.2f}M USDT  
+Капитализация {cap_str}  
 
-🎯 Тейк-профит:
-• TP1 {TP_PERCENT}%: {tp1:.6f} (-{TP_PERCENT}%) — полное закрытие
-• Цель отката (Фибо 0.5): {tp2:.6f}
+---
 
-🛑 Стоп-лосс:
-• SL: {sl_price:.6f} (+{sl_percent:.2f}%)
-• Оценка к депозиту: ~{risk_to_deposit:.2f}% (при {RISK_PERCENT}% позиции и {LEVERAGE}x)
+### Деривативы:
+Фандинг {funding_str}  
+OI 15м {oi_change_str} | Объем 15м ?  
 
-⚠️ Замечания:
-• Объём за сутки: ${volume24h/1_000_000:.1f}M
-• Зона на старшем ТФ найдена, до неё {abs((entry_price - level_price)/level_price*100):.2f}% — лимитный ордер
-• Уровень подтверждён на ТФ: {', '.join(confirmed_tfs)}
+---
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+### Фьючерсный стакан:
+Плотность покупателей:  
+в пределах 0.2% {bid_dens[0.2]:.0f} | 0.5% {bid_dens[0.5]:.0f} | 1.0% {bid_dens[1.0]:.0f} | 5.0% {bid_dens[5.0]:.0f} | 10.0% {bid_dens[10.0]:.0f}  
+
+Плотность продавцов:  
+0.2% {ask_dens[0.2]:.0f} | 0.5% {ask_dens[0.5]:.0f} | 1.0% {ask_dens[1.0]:.0f} | 5.0% {ask_dens[5.0]:.0f} | 10.0% {ask_dens[10.0]:.0f}  
+
+Плотность Стенки продажи:  
++0.41% @ {price*1.0041:.4f} → {large_ask[1]:.0f}  
++0.53% @ {price*1.0053:.4f} → ?
+
+---
+
+### Спот-лимитики:
+Продажи:  
++1.56% @ {price*1.0156:.4f} → ?  
+Покупки:  
+-0.28% @ {price*0.9972:.4f} → {large_bid[1]:.0f}
 """
     return msg
 
 def main():
-    send_telegram("🚀 Бот SHORT (KuCoin + Gate.io + BingX) запущен. Анализ каждые 10 минут.")
-    print("Бот запущен. Анализ SHORT сигналов.")
+    send_telegram("🚀 Бот 3 (полноценный анализ SHORT) запущен. Анализ каждые 30 минут.")
+    print("Бот запущен.")
     while True:
-        coins = get_all_usdt_pairs()
-        if not coins:
-            print("Нет монет, повтор через 30 сек")
-            time.sleep(30)
-            continue
-        print(f"Начинаю анализ {len(coins)} монет...")
-        for coin in coins:
+        for symbol in SYMBOLS:
             try:
-                signal = analyze_coin(coin['symbol'])
+                signal = analyze_symbol(symbol)
                 if signal:
                     send_telegram(signal)
                     time.sleep(2)
             except Exception as e:
-                print(f"Ошибка {coin['symbol']}: {e}")
-            time.sleep(0.3)
+                print(f"Ошибка {symbol}: {e}")
+            time.sleep(1)
         print(f"{datetime.now()} - цикл завершён, жду {CHECK_INTERVAL} сек.")
         time.sleep(CHECK_INTERVAL)
 
