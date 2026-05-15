@@ -1,27 +1,28 @@
 import requests
-import schedule
 import time
-import math
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
-MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
-MAX_24H_VOLUME_USDT = 500_000           # макс. объём $500k (низколиквидные)
-MIN_24H_VOLUME_USDT = 30_000                 # минимальный объём (можно 0)
+MAX_COINS = 500
+MAX_24H_VOLUME_USDT = 500_000
+MIN_24H_VOLUME_USDT = 30_000
 TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
-# Пороги для SHORT сигнала
 RSI_4H_MIN = 65
 RSI_1H_MIN = 65
 CHANGE_4H_MIN = 2.0
 FUNDING_MIN = 0.0
-VOLUME_24H_MIN = 3_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
-# =================================
+VOLUME_24H_MIN = 3_000_000
 
-# Резервный список низколиквидных монет (используется, если Binance недоступен)
+# Время работы (МСК)
+WORK_START_HOUR = 10
+WORK_END_HOUR = 22
+SCAN_INTERVAL_MINUTES = 60  # интервал между сканированиями в минутах (можно 30, 45, 60 и т.д.)
+
+# Резервный список монет
 FALLBACK_COINS = [
     "RARE", "CLV", "DGB", "REI", "ALPACA", "FORTH", "BADGER", "NULS", "QKC",
     "DOCK", "TOMO", "HARD", "SYS", "MIR", "RLC", "OXT", "CTK", "MDX", "FIRO",
@@ -29,6 +30,11 @@ FALLBACK_COINS = [
     "DEGO", "LTO", "KMD", "LINA", "FRONT", "LOOM", "STPT", "ARK", "POLYX",
     "BNX", "EPX", "SPELL", "TROY", "WTC", "WAVES", "CELO", "AERGO", "SUN"
 ]
+# =================================
+
+def moscow_now():
+    """Текущее время в Москве (UTC+3)."""
+    return datetime.now(timezone(timedelta(hours=3)))
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -37,26 +43,19 @@ def send_telegram(text):
     except:
         pass
 
-# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ (ИСПРАВЛЕНО) ----------
 def get_low_volume_coins():
-    """
-    Возвращает список монет с наименьшим 24h объёмом с Binance.
-    При ошибке использует резервный список FALLBACK_COINS.
-    """
+    """Список низколиквидных монет с fallback."""
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=15)  # увеличен таймаут
+        r = requests.get(url, timeout=15)
         data = r.json()
         if not isinstance(data, list):
             raise ValueError("Неверный формат данных")
-        # Фильтруем USDT пары
         usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
-        # Сортируем по объёму (quoteVolume) от меньшего к большему
         usdt_pairs.sort(key=lambda x: float(x['quoteVolume']))
         coins = []
         for pair in usdt_pairs:
             sym = pair['symbol'].replace('USDT', '')
-            # Исключаем BTC, ETH, стейблкоины
             if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
                 continue
             vol = float(pair['quoteVolume'])
@@ -67,21 +66,18 @@ def get_low_volume_coins():
         print(f"Загружено {len(coins)} монет с Binance")
         return coins
     except Exception as e:
-        print(f"Ошибка получения с Binance: {e}. Использую резервный список из {len(FALLBACK_COINS)} монет.")
-        # Если не удалось – берём готовый список (ограничиваем по MAX_COINS)
+        print(f"Ошибка Binance: {e}. Использую резервный список.")
         return FALLBACK_COINS[:MAX_COINS]
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
 def get_klines(symbol, interval='5m', limit=100):
-    # Bybit
     interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
-    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
+    # Bybit
     try:
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
         r = requests.get(url, timeout=8)
         data = r.json()
         if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-            klines = data['result']['list']
-            closes = [float(k[4]) for k in klines]
+            closes = [float(k[4]) for k in data['result']['list']]
             closes.reverse()
             return closes
     except:
@@ -153,7 +149,6 @@ def get_realtime_price(symbol):
         return None
 
 def analyze_coin(symbol):
-    # RSI
     rsis = {}
     for tf in TIMEFRAMES_RSI:
         closes = get_klines(symbol, tf, 50)
@@ -163,7 +158,6 @@ def analyze_coin(symbol):
         if rsis[tf] is None:
             return None
 
-    # Изменения
     change_24h, volume_24h = get_24h_stats(symbol)
     if change_24h is None:
         return None
@@ -172,29 +166,28 @@ def analyze_coin(symbol):
     change_4h = get_price_change(symbol, '4h', 240) or 0
     funding = get_funding(symbol)
 
-    # Условия для SHORT сигнала
     if (rsis['4h'] >= RSI_4H_MIN and rsis['1h'] >= RSI_1H_MIN and
         change_4h >= CHANGE_4H_MIN and funding is not None and funding >= FUNDING_MIN and
         volume_24h >= VOLUME_24H_MIN):
 
         reasons = []
         if rsis['4h'] >= RSI_4H_MIN:
-            reasons.append(f"RSI 4h = {rsis['4h']} (выше {RSI_4H_MIN}) – сильная перекупленность")
+            reasons.append(f"RSI 4h = {rsis['4h']} (выше {RSI_4H_MIN}) – перекупленность")
         if rsis['1h'] >= RSI_1H_MIN:
-            reasons.append(f"RSI 1h = {rsis['1h']} (выше {RSI_1H_MIN}) – подтверждение перекупленности")
+            reasons.append(f"RSI 1h = {rsis['1h']} (выше {RSI_1H_MIN}) – подтверждение")
         if change_4h >= CHANGE_4H_MIN:
             reasons.append(f"рост за 4ч = {change_4h:.2f}% (выше {CHANGE_4H_MIN}%) – импульс исчерпан")
         if funding >= FUNDING_MIN:
             reasons.append(f"фандинг = {funding:.2f}% – лонгисты платят шортистам")
         if volume_24h >= VOLUME_24H_MIN:
-            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – достаточно ликвидности для сделки")
+            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – ликвидность достаточна")
         explanation = " ".join(reasons)
 
         real_price = get_realtime_price(symbol)
         if real_price is None:
             return None
 
-        msg = f"""
+        return f"""
 🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | {real_price:.4f}
 
 <b>RSI:</b> 5m {rsis['5m']} | 15m {rsis['15m']} | 1h {rsis['1h']} | 4h {rsis['4h']}
@@ -202,18 +195,17 @@ def analyze_coin(symbol):
 <b>Объём 24h:</b> {volume_24h/1e6:.2f}M
 <b>Фандинг:</b> {funding:+.4f}% ✅
 
-💡 <b>Логическое обоснование:</b> {explanation}. Совокупность факторов указывает на высокую вероятность коррекции вниз.
+💡 <b>Обоснование:</b> {explanation}. Вероятна коррекция вниз.
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ {moscow_now().strftime('%Y-%m-%d %H:%M')} (МСК)
 """
-        return msg
     return None
 
 def scan_market():
-    print(f"[{datetime.now()}] Начинаю анализ монет...")
+    print(f"[{moscow_now().strftime('%H:%M')} МСК] Начинаю анализ...")
     coins = get_low_volume_coins()
     if not coins:
-        send_telegram("⚠️ Не удалось получить список низколиквидных монет даже из резервного списка.")
+        send_telegram("⚠️ Не удалось получить список монет")
         return
     signals = []
     for idx, symbol in enumerate(coins):
@@ -221,23 +213,36 @@ def scan_market():
             msg = analyze_coin(symbol)
             if msg:
                 signals.append(msg)
-                print(f"✅ Сигнал для {symbol}")
+                print(f"✅ Сигнал: {symbol}")
         except Exception as e:
             print(f"Ошибка {symbol}: {e}")
-        time.sleep(0.3)  # небольшая задержка, чтобы не перегружать API
+        time.sleep(0.3)
         if idx % 50 == 0:
-            print(f"Обработано {idx}/{len(coins)} монет")
+            print(f"Обработано {idx}/{len(coins)}")
     for msg in signals:
         send_telegram(msg)
         time.sleep(2)
     print(f"Готово. Сигналов: {len(signals)}")
 
+def is_working_hours():
+    """Проверяет, находимся ли в рабочем окне (10–22 МСК)."""
+    now = moscow_now()
+    return WORK_START_HOUR <= now.hour < WORK_END_HOUR
+
 if __name__ == "__main__":
-    # Первый запуск сразу
-    scan_market()
-    # Запуск по расписанию (каждые 4 часа)
-    schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. Ожидание следующего цикла...")
+    print(f"Бот запущен. Работает по МСК с {WORK_START_HOUR}:00 до {WORK_END_HOUR}:00, интервал {SCAN_INTERVAL_MINUTES} мин.")
+    last_scan_time = None
+
     while True:
-        schedule.run_pending()
+        if is_working_hours():
+            now = moscow_now()
+            # Если сканирование ещё не было, или прошло SCAN_INTERVAL_MINUTES минут
+            if last_scan_time is None or (now - last_scan_time) >= timedelta(minutes=SCAN_INTERVAL_MINUTES):
+                print(f"Запуск сканирования в {now.strftime('%H:%M')} МСК")
+                scan_market()
+                last_scan_time = moscow_now()
+        else:
+            if last_scan_time is not None:
+                print(f"Нерабочее время. Ожидание {WORK_START_HOUR}:00 МСК.")
+                last_scan_time = None
         time.sleep(60)
