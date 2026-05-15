@@ -2,6 +2,9 @@ import requests
 import time
 from datetime import datetime, timezone, timedelta
 import math
+import mplfinance as mpf
+import pandas as pd
+import io
 
 # ===================== НАСТРОЙКИ =====================
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
@@ -28,16 +31,16 @@ STOCH_OVERBOUGHT = 80
 
 # ATR для расчёта SL/TP
 ATR_PERIOD = 14
-SL_ATR_MULT = 1.5          # стоп-лосс от цены вверх (для шорта)
-TP1_ATR_MULT = 2.0         # первый тейк-профит вниз
-TP2_ATR_MULT = 4.0         # второй тейк-профит вниз
+SL_ATR_MULT = 1.5
+TP1_ATR_MULT = 2.0
+TP2_ATR_MULT = 4.0
 
-# Режим работы
-WORK_START_HOUR = 8
+# Режим работы (МСК)
+WORK_START_HOUR = 10   # исправлено: без ведущего нуля
 WORK_END_HOUR = 22
-SCAN_INTERVAL_MINUTES = 30
+SCAN_INTERVAL_MINUTES = 60
 
-# Резервный список монет (если Binance недоступен)
+# Резервный список монет
 FALLBACK_COINS = [
     "RARE", "CLV", "DGB", "REI", "ALPACA", "FORTH", "BADGER", "NULS", "QKC",
     "DOCK", "TOMO", "HARD", "SYS", "MIR", "RLC", "OXT", "CTK", "MDX", "FIRO",
@@ -50,7 +53,18 @@ FALLBACK_COINS = [
 def moscow_now():
     return datetime.now(timezone(timedelta(hours=3)))
 
+def send_telegram_photo(caption, chart_buf):
+    """Отправляет фото с подписью."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    try:
+        files = {'photo': ('chart.png', chart_buf, 'image/png')}
+        data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
+        requests.post(url, data=data, files=files)
+    except Exception as e:
+        print(f"Ошибка отправки фото: {e}")
+
 def send_telegram(text):
+    """Отправляет текстовое сообщение (используется редко)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
@@ -84,6 +98,7 @@ def get_low_volume_coins():
         return FALLBACK_COINS[:MAX_COINS]
 
 def get_klines(symbol, interval='5m', limit=100):
+    """Возвращает список свечей [open, high, low, close, volume]."""
     interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
     try:
         url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
@@ -190,7 +205,6 @@ def macd(closes, fast=12, slow=26, signal=9):
     ema_fast = ema(closes, fast)
     ema_slow = ema(closes, slow)
     macd_line = ema_fast - ema_slow
-    # signal line
     macd_vals = []
     for i in range(slow-1, len(closes)):
         e_f = ema(closes[:i+1], fast)
@@ -210,8 +224,6 @@ def stochastic(highs, lows, closes, k_period=14, d_period=3):
     if highest == lowest:
         return 50.0, 50.0
     k = 100.0 * (closes[-1] - lowest) / (highest - lowest)
-    # для %D нужен список K, но для фильтра используем последний K
-    # упрощённо: D = SMA(K, d_period) – посчитаем по последним k_period свечам
     ks = []
     for i in range(k_period, 0, -1):
         h = max(highs[-i:])
@@ -225,7 +237,7 @@ def stochastic(highs, lows, closes, k_period=14, d_period=3):
     return k, d
 
 def detect_candle_pattern(open_, high, low, close, prev_open, prev_close):
-    """Возвращает True, если обнаружен медвежий разворотный паттерн."""
+    """True, если медвежий разворотный паттерн."""
     # Медвежье поглощение
     if prev_close > prev_open and close < open_ and close < prev_open and open_ > prev_close:
         return True
@@ -238,18 +250,45 @@ def detect_candle_pattern(open_, high, low, close, prev_open, prev_close):
             return True
     return False
 
-# -------------- Анализ монеты --------------
-def analyze_coin(symbol):
-    # Загружаем свечи для 4h (основной фильтр) и 1h (доп. индикаторы)
-    ohlcv_4h = get_klines(symbol, '4h', 50)
-    ohlcv_1h = get_klines(symbol, '1h', 50)
-    ohlcv_15m = get_klines(symbol, '15m', 2)
-    ohlcv_5m = get_klines(symbol, '5m', 50)
+# -------------- Генерация графика --------------
+def generate_chart(symbol, ohlcv_4h):
+    """Создаёт свечной график 4h с индикаторами и возвращает BytesIO."""
+    if len(ohlcv_4h) < 20:
+        return None
+    # Преобразуем в DataFrame (последние 60 свечей)
+    df = pd.DataFrame(ohlcv_4h[-60:], columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+    # Искусственный индекс времени, начиная с "сейчас" назад
+    idx = pd.date_range(end=pd.Timestamp.now(tz='Europe/Moscow'), periods=len(df), freq='4h')
+    df.index = idx
 
+    # Рассчитываем линии для графика
+    ema9 = df['Close'].ewm(span=9).mean()
+    ema21 = df['Close'].ewm(span=21).mean()
+    bb_upper = df['Close'].rolling(20).mean() + 2*df['Close'].rolling(20).std()
+    bb_lower = df['Close'].rolling(20).mean() - 2*df['Close'].rolling(20).std()
+
+    apds = [
+        mpf.make_addplot(ema9, color='lime', width=1),
+        mpf.make_addplot(ema21, color='orange', width=1),
+        mpf.make_addplot(bb_upper, color='gray', linestyle='dashed'),
+        mpf.make_addplot(bb_lower, color='gray', linestyle='dashed')
+    ]
+
+    buf = io.BytesIO()
+    mpf.plot(df, type='candle', style='charles', volume=True,
+             addplot=apds, title=f'{symbol} 4h',
+             ylabel='Price', ylabel_lower='Volume',
+             savefig=dict(fname=buf, bbox_inches='tight'))
+    buf.seek(0)
+    return buf
+
+# -------------- Анализ монеты (возвращает текст + буфер графика) --------------
+def analyze_coin(symbol):
+    ohlcv_4h = get_klines(symbol, '4h', 60)
+    ohlcv_1h = get_klines(symbol, '1h', 50)
     if len(ohlcv_4h) < 20 or len(ohlcv_1h) < 20:
         return None
 
-    # Извлекаем цены
     closes_4h = [c[3] for c in ohlcv_4h]
     highs_4h = [c[1] for c in ohlcv_4h]
     lows_4h = [c[2] for c in ohlcv_4h]
@@ -260,32 +299,26 @@ def analyze_coin(symbol):
     lows_1h = [c[2] for c in ohlcv_1h]
     opens_1h = [c[0] for c in ohlcv_1h]
 
-    # RSI
-    rsi_4h = rsi(closes_4h, 14)
-    rsi_1h = rsi(closes_1h, 14)
+    rsi_4h = rsi(closes_4h)
+    rsi_1h = rsi(closes_1h)
     if rsi_4h is None or rsi_1h is None:
         return None
 
-    # Bollinger Bands (4h)
     bb_upper, bb_mid, bb_lower = bollinger_bands(closes_4h, BB_PERIOD, BB_STD)
     if bb_upper is None:
         return None
     price_above_bb = closes_4h[-1] > bb_upper
 
-    # MACD (1h)
-    macd_line, signal_line, histogram = macd(closes_1h, 12, 26, 9)
+    macd_line, signal_line, histogram = macd(closes_1h)
     macd_bearish = macd_line is not None and signal_line is not None and macd_line < signal_line
 
-    # Stochastic (4h)
     stoch_k, stoch_d = stochastic(highs_4h, lows_4h, closes_4h, STOCH_K_PERIOD, STOCH_D_PERIOD)
     stoch_over = stoch_k is not None and stoch_k > STOCH_OVERBOUGHT
 
-    # ATR (1h для SL/TP)
     atr_val = compute_atr(highs_1h, lows_1h, closes_1h, ATR_PERIOD)
     if atr_val is None:
         return None
 
-    # Ценовые изменения
     change_24h, volume_24h = get_24h_stats(symbol)
     if change_24h is None or volume_24h is None:
         return None
@@ -293,6 +326,7 @@ def analyze_coin(symbol):
         change_4h = (closes_4h[-1] - closes_4h[-2]) / closes_4h[-2] * 100
     else:
         return None
+
     funding = get_funding(symbol)
     real_price = get_realtime_price(symbol)
     if real_price is None:
@@ -311,32 +345,28 @@ def analyze_coin(symbol):
             funding is not None and funding >= FUNDING_MIN and volume_24h >= VOLUME_24H_MIN):
         return None
 
-    # Дополнительные подтверждения (собираем баллы)
+    # Дополнительные подтверждения
     confirmations = []
     if price_above_bb:
-        confirmations.append(f"Цена выше верхней полосы Боллинджера (4h) – перекупленность")
+        confirmations.append(f"• Цена выше верхней полосы Боллинджера (4h) – перекупленность")
     if macd_bearish:
-        confirmations.append(f"MACD медвежий (1h) – сигнал разворота")
+        confirmations.append(f"• MACD медвежий (1h) – сигнал разворота")
     if stoch_over:
-        confirmations.append(f"Стохастик перекуплен (>80) – возможен откат")
+        confirmations.append(f"• Стохастик перекуплен (>80) – возможен откат")
     if candle_bearish:
-        confirmations.append(f"Медвежий свечной паттерн (4h) – давление продавцов")
+        confirmations.append(f"• Медвежий свечной паттерн (4h) – давление продавцов")
 
-    # Минимум 2 подтверждения
     if len(confirmations) < 2:
         return None
 
-    # Расчёт SL и TP
     entry = real_price
     sl = entry + SL_ATR_MULT * atr_val
     tp1 = entry - TP1_ATR_MULT * atr_val
     tp2 = entry - TP2_ATR_MULT * atr_val
 
-    # Формируем сообщение
-    reason_text = "\n".join([f"• {c}" for c in confirmations])
+    reason_text = "\n".join(confirmations)
 
-    msg = f"""
-🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | Цена: {entry:.6f}
+    msg = f"""🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | Цена: {entry:.6f}
 
 <b>Вход:</b> {entry:.6f}
 <b>Стоп-лосс:</b> {sl:.6f} (ATR × {SL_ATR_MULT})
@@ -352,9 +382,13 @@ RSI 4h: {rsi_4h:.1f} | RSI 1h: {rsi_1h:.1f}
 <b>Подтверждения:</b>
 {reason_text}
 
-⏰ {moscow_now().strftime('%Y-%m-%d %H:%M')} (МСК)
-"""
-    return msg
+⏰ {moscow_now().strftime('%Y-%m-%d %H:%M')} (МСК)"""
+
+    # Генерируем график
+    chart_buf = generate_chart(symbol, ohlcv_4h)
+    if chart_buf is None:
+        return None
+    return (msg, chart_buf)
 
 # -------------- Сканер --------------
 def scan_market():
@@ -366,17 +400,17 @@ def scan_market():
     signals = []
     for idx, symbol in enumerate(coins):
         try:
-            msg = analyze_coin(symbol)
-            if msg:
-                signals.append(msg)
+            result = analyze_coin(symbol)
+            if result:
+                signals.append(result)
                 print(f"✅ Сигнал: {symbol}")
         except Exception as e:
             print(f"Ошибка {symbol}: {e}")
         time.sleep(0.3)
         if idx % 50 == 0:
             print(f"Обработано {idx}/{len(coins)}")
-    for msg in signals:
-        send_telegram(msg)
+    for msg, chart in signals:
+        send_telegram_photo(msg, chart)
         time.sleep(2)
     print(f"Готово. Сигналов: {len(signals)}")
 
@@ -385,7 +419,7 @@ def is_working_hours():
     return WORK_START_HOUR <= now.hour < WORK_END_HOUR
 
 if __name__ == "__main__":
-    print(f"Бот запущен с расширенными индикаторами. Работает с {WORK_START_HOUR}:00 до {WORK_END_HOUR}:00 МСК, интервал {SCAN_INTERVAL_MINUTES} мин.")
+    print(f"Бот запущен с графиками. Работает с {WORK_START_HOUR}:00 до {WORK_END_HOUR}:00 МСК, интервал {SCAN_INTERVAL_MINUTES} мин.")
     last_scan_time = None
     while True:
         if is_working_hours():
