@@ -33,7 +33,7 @@ def get_low_volume_coins():
     """Возвращает список монет с наименьшим 24h объёмом (отсортированы по возрастанию объёма)"""
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=30)
         data = r.json()
         if not isinstance(data, list):
             return []
