@@ -5,18 +5,20 @@ import math
 from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
-TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
+TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
-MAX_COINS = 500
-MIN_24H_VOLUME_USDT = 300_000
+MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
+MAX_24H_VOLUME_USDT = 200_000           # макс. объём $200k (низколиквидные)
+MIN_24H_VOLUME_USDT = 0                 # минимальный объём (можно 0)
 TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
+# Пороги для SHORT сигнала
 RSI_4H_MIN = 65
 RSI_1H_MIN = 65
 CHANGE_4H_MIN = 2.0
 FUNDING_MIN = 0.0
-VOLUME_24H_MIN = 5_000_000
+VOLUME_24H_MIN = 5_000_000              # всё ещё требуем некоторый объём для сигнала (можно уменьшить)
 # =================================
 
 def send_telegram(text):
@@ -26,7 +28,37 @@ def send_telegram(text):
     except:
         pass
 
-# ---------- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ----------
+# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ ----------
+def get_low_volume_coins():
+    """Возвращает список монет с наименьшим 24h объёмом (отсортированы по возрастанию объёма)"""
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        r = requests.get(url, timeout=15)
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        # Фильтруем USDT пары
+        usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
+        # Сортируем по объёму (quoteVolume) от меньшего к большему
+        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']))
+        coins = []
+        for pair in usdt_pairs:
+            sym = pair['symbol'].replace('USDT', '')
+            # Исключаем BTC, ETH, стейблкоины
+            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+                continue
+            vol = float(pair['quoteVolume'])
+            if MIN_24H_VOLUME_USDT <= vol <= MAX_24H_VOLUME_USDT:
+                coins.append(sym)
+                if len(coins) >= MAX_COINS:
+                    break
+        print(f"Загружено {len(coins)} низколиквидных монет")
+        return coins
+    except Exception as e:
+        print(f"Ошибка получения списка монет: {e}")
+        return []
+
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ----------
 def get_klines(symbol, interval='5m', limit=100):
     # Bybit
     interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
@@ -107,39 +139,6 @@ def get_realtime_price(symbol):
     except:
         return None
 
-def get_top_coins():
-    # KuCoin
-    try:
-        url = "https://api.kucoin.com/api/v1/symbols"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if data.get('code') == '200000':
-            symbols = [s['symbol'] for s in data['data'] if s['symbol'].endswith('-USDT')]
-            tickers_url = "https://api.kucoin.com/api/v1/market/allTickers"
-            tickers_r = requests.get(tickers_url, timeout=10)
-            tickers_data = tickers_r.json()
-            if tickers_data.get('code') == '200000':
-                tickers = {t['symbol']: float(t['volValue']) for t in tickers_data['data']['ticker'] if 'volValue' in t}
-                sorted_symbols = sorted(symbols, key=lambda s: tickers.get(s, 0), reverse=True)
-                coins = []
-                for sym in sorted_symbols[:MAX_COINS]:
-                    base = sym.replace('-USDT', '')
-                    if base in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD']:
-                        continue
-                    vol = tickers.get(sym, 0)
-                    if vol >= MIN_24H_VOLUME_USDT:
-                        coins.append(base)
-                if coins:
-                    print(f"Загружено {len(coins)} монет с KuCoin")
-                    return coins
-    except Exception as e:
-        print(f"KuCoin список не удался: {e}")
-
-    # Резервный список
-    fallback = ["SOL","XRP","ADA","DOGE","MATIC","DOT","AVAX","LINK","LTC","NEAR","ATOM","FIL","ALGO","VET","ICP","EGLD","THETA","FTM","SAND","MANA","AXS","ENJ","ZIL","KLAY","CHZ","ONE","ICX","XTZ","AAVE","BCH","EOS","TRX","XLM","ZEC","DASH","NEO","ONT","QTUM","WAVES","KSM","RUNE","PEPE","WIF","BONK","FLOKI","NOT","TON","OP","ARB","SUI","APT","INJ","SEI","TIA","PYTH","JUP","ONDO","STRK","ENA","ETHFI","1000LUNC","LUNA2","USTC","ANC","MIR","BAT","ZRX","REP","SNX","COMP","MKR","YFI","CRV","UNI","SUSHI","CAKE","BAKE","ALPHA","BETA","GALA","CHZ","OGN","STORJ","BLZ","COTI","HOT","IOST","IOTX","KNC","LRC","NKN","NMR","POLS","RARE","REQ","RLC","STMX","SXP","TWT","VIDT","WAN","WAXP","ZEN","ZKS"]
-    print(f"Использую резервный список из {len(fallback[:MAX_COINS])} монет")
-    return fallback[:MAX_COINS]
-
 def analyze_coin(symbol):
     # RSI
     rsis = {}
@@ -160,6 +159,7 @@ def analyze_coin(symbol):
     change_4h = get_price_change(symbol, '4h', 240) or 0
     funding = get_funding(symbol)
 
+    # Условия для SHORT сигнала
     if (rsis['4h'] >= RSI_4H_MIN and rsis['1h'] >= RSI_1H_MIN and
         change_4h >= CHANGE_4H_MIN and funding is not None and funding >= FUNDING_MIN and
         volume_24h >= VOLUME_24H_MIN):
@@ -174,7 +174,7 @@ def analyze_coin(symbol):
         if funding >= FUNDING_MIN:
             reasons.append(f"фандинг = {funding:.2f}% – лонгисты платят шортистам")
         if volume_24h >= VOLUME_24H_MIN:
-            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – высокая ликвидность")
+            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – достаточно ликвидности для сделки")
         explanation = " ".join(reasons)
 
         real_price = get_realtime_price(symbol)
@@ -197,10 +197,10 @@ def analyze_coin(symbol):
     return None
 
 def scan_market():
-    print(f"[{datetime.now()}] Начинаю анализ...")
-    coins = get_top_coins()
+    print(f"[{datetime.now()}] Начинаю анализ низколиквидных монет...")
+    coins = get_low_volume_coins()
     if not coins:
-        send_telegram("⚠️ Не удалось получить список монет")
+        send_telegram("⚠️ Не удалось получить список низколиквидных монет")
         return
     signals = []
     for idx, symbol in enumerate(coins):
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     scan_market()
     # Запуск по расписанию (каждые 4 часа)
     schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. Анализ каждые 4 часа.")
+    print("Бот запущен. Анализ низколиквидных монет каждые 4 часа.")
     while True:
         schedule.run_pending()
         time.sleep(60)
