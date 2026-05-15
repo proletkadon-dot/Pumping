@@ -33,9 +33,9 @@ TP1_ATR_MULT = 2.0         # первый тейк-профит вниз
 TP2_ATR_MULT = 4.0         # второй тейк-профит вниз
 
 # Режим работы
-WORK_START_HOUR = 10
+WORK_START_HOUR = 08
 WORK_END_HOUR = 22
-SCAN_INTERVAL_MINUTES = 60
+SCAN_INTERVAL_MINUTES = 30
 
 # Резервный список монет (если Binance недоступен)
 FALLBACK_COINS = [
