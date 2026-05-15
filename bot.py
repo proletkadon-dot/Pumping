@@ -5,7 +5,7 @@ import math
 from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
-TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
+TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
 MAX_COINS = 500                         # сколько монет анализировать (из самых низколиквидных)
