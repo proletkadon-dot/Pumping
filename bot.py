@@ -1,435 +1,215 @@
 import requests
 import time
-from datetime import datetime, timezone, timedelta
-import math
-import mplfinance as mpf
-import pandas as pd
-import io
+from datetime import datetime
 
-# ===================== НАСТРОЙКИ =====================
+# ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8302482854:AAFVRh7y6B7yIX0IVRnLy7Om30uPu_cyGw4"
 CHAT_ID = "694614387"
 
-MAX_COINS = 500
-MAX_24H_VOLUME_USDT = 500_000
-MIN_24H_VOLUME_USDT = 30_000
-TIMEFRAMES = ['5m', '15m', '1h', '4h']
-
-# Основные фильтры
-RSI_4H_MIN = 65
-RSI_1H_MIN = 65
+TOP_GAINERS_COUNT = 6        # анализируем 6 лучших по росту
+MIN_24H_CHANGE = 5.0         # минимальный рост за 24ч (%)
+RSI_1H_MIN = 70
 CHANGE_4H_MIN = 2.0
-FUNDING_MIN = 0.0
-VOLUME_24H_MIN = 3_000_000
+VOLUME_24H_MIN = 500_000
+CHECK_INTERVAL = 7200        # 2 часа (можно уменьшить до 3600)
+DELAY_BETWEEN_COINS = 10     # пауза между анализом монет (сек)
+MAX_MARKET_CAP = 500_000_000 # исключаем монеты с капой > $500M (только средние и мелкие)
+# =================================
 
-# Индикаторы: Bollinger, Stochastic
-BB_PERIOD = 20
-BB_STD = 2.0
-STOCH_K_PERIOD = 14
-STOCH_D_PERIOD = 3
-STOCH_OVERBOUGHT = 80
-
-# ATR для расчёта SL/TP
-ATR_PERIOD = 14
-SL_ATR_MULT = 1.5
-TP1_ATR_MULT = 2.0
-TP2_ATR_MULT = 4.0
-
-# Режим работы (МСК)
-WORK_START_HOUR = 10   # исправлено: без ведущего нуля
-WORK_END_HOUR = 22
-SCAN_INTERVAL_MINUTES = 60
-
-# Резервный список монет
-FALLBACK_COINS = [
-    "RARE", "CLV", "DGB", "REI", "ALPACA", "FORTH", "BADGER", "NULS", "QKC",
-    "DOCK", "TOMO", "HARD", "SYS", "MIR", "RLC", "OXT", "CTK", "MDX", "FIRO",
-    "BURGER", "SANTOS", "MLN", "DIA", "WAN", "UNFI", "RGT", "VIDT", "QSP",
-    "DEGO", "LTO", "KMD", "LINA", "FRONT", "LOOM", "STPT", "ARK", "POLYX",
-    "BNX", "EPX", "SPELL", "TROY", "WTC", "WAVES", "CELO", "AERGO", "SUN"
-]
-# =====================================================
-
-def moscow_now():
-    return datetime.now(timezone(timedelta(hours=3)))
-
-def send_telegram_photo(caption, chart_buf):
-    """Отправляет фото с подписью."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    try:
-        files = {'photo': ('chart.png', chart_buf, 'image/png')}
-        data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-        requests.post(url, data=data, files=files)
-    except Exception as e:
-        print(f"Ошибка отправки фото: {e}")
+# Словарь соответствий символов -> ID (дополнен для новых монет)
+SYMBOL_TO_ID = {
+    "SOL": "solana", "XRP": "ripple", "ADA": "cardano", "DOGE": "dogecoin",
+    "MATIC": "matic-network", "DOT": "polkadot", "AVAX": "avalanche-2",
+    "LINK": "chainlink", "LTC": "litecoin", "NEAR": "near", "ATOM": "cosmos",
+    "FIL": "filecoin", "ALGO": "algorand", "VET": "vechain", "ICP": "internet-computer",
+    "EGLD": "elrond", "THETA": "theta-token", "FTM": "fantom", "SAND": "the-sandbox",
+    "MANA": "decentraland", "AXS": "axie-infinity", "ENJ": "enjincoin", "ZIL": "zilliqa",
+    "KLAY": "klay-token", "CHZ": "chiliz", "ONE": "harmony", "ICX": "icon",
+    "XTZ": "tezos", "AAVE": "aave", "BCH": "bitcoin-cash", "EOS": "eos",
+    "TRX": "tron", "XLM": "stellar", "ZEC": "zcash", "DASH": "dash",
+    "NEO": "neo", "ONT": "ontology", "QTUM": "qtum", "WAVES": "waves",
+    "KSM": "kusama", "RUNE": "thorchain", "PEPE": "pepe", "WIF": "dogwifhat",
+    "BONK": "bonk", "FLOKI": "floki", "NOT": "notcoin", "TON": "the-open-network",
+    "OP": "optimism", "ARB": "arbitrum", "SUI": "sui", "APT": "aptos",
+    "INJ": "injective-protocol", "SEI": "sei-network", "TIA": "celestia",
+    "PYTH": "pyth-network", "JUP": "jupiter", "ONDO": "ondo-finance",
+    "STRK": "starknet", "ENA": "ethena", "ETHFI": "ether-fi",
+    "1000LUNC": "terra-luna-classic", "LUNA2": "terra-luna-2", "USTC": "terrausd",
+    "ANC": "anchor-protocol", "MIR": "mirror-protocol", "OSMO": "osmosis",
+    "LAB": "lab", "PROS": "pros", "STORJ": "storj", "ORCA": "orca", "ZBT": "zbt",
+    "AI": "ai", "LUNC": "terra-luna-classic"
+}
 
 def send_telegram(text):
-    """Отправляет текстовое сообщение (используется редко)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
     except:
         pass
 
-# -------------- Получение рыночных данных --------------
-def get_low_volume_coins():
-    try:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=15)
-        data = r.json()
+def get_with_retries(url, max_retries=5, initial_delay=5):
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            elif r.status_code == 429:
+                wait = initial_delay * (2 ** attempt)
+                print(f"Ошибка 429, жду {wait} сек...")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"Попытка {attempt+1}: статус {r.status_code}")
+        except Exception as e:
+            print(f"Попытка {attempt+1}: {e}")
+        if attempt < max_retries - 1:
+            time.sleep(initial_delay * (attempt+1))
+    return None
+
+def get_midcap_coins():
+    """Получает список монет с капитализацией < MAX_MARKET_CAP из топ-500 по капитализации."""
+    all_coins = []
+    for page in range(1, 3):  # страницы 1 и 2 по 250 монет
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}&sparkline=false"
+        data = get_with_retries(url)
         if not isinstance(data, list):
-            raise ValueError("Неверный формат данных")
-        usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
-        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']))
-        coins = []
-        for pair in usdt_pairs:
-            sym = pair['symbol'].replace('USDT', '')
+            continue
+        for coin in data:
+            sym = coin['symbol'].upper()
             if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
                 continue
-            vol = float(pair['quoteVolume'])
-            if MIN_24H_VOLUME_USDT <= vol <= MAX_24H_VOLUME_USDT:
-                coins.append(sym)
-                if len(coins) >= MAX_COINS:
-                    break
-        print(f"Загружено {len(coins)} монет с Binance")
-        return coins
-    except Exception as e:
-        print(f"Ошибка Binance: {e}. Использую резервный список.")
-        return FALLBACK_COINS[:MAX_COINS]
+            market_cap = coin.get('market_cap', 0)
+            if market_cap > MAX_MARKET_CAP:
+                continue
+            change = coin.get('price_change_percentage_24h')
+            if change is None:
+                continue  # пропускаем монеты без данных
+            all_coins.append({
+                'symbol': sym,
+                'id': coin['id'],
+                'market_cap': market_cap,
+                'volume': coin['total_volume'],
+                'price': coin['current_price'],
+                'change_24h': change
+            })
+        time.sleep(2)
+    # Сортируем по росту за 24ч (убывание)
+    all_coins.sort(key=lambda x: x['change_24h'], reverse=True)
+    return all_coins
 
-def get_klines(symbol, interval='5m', limit=100):
-    """Возвращает список свечей [open, high, low, close, volume]."""
-    interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
-    try:
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-            klines = data['result']['list']
-            ohlcv = [[float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in klines]
-            ohlcv.reverse()
-            return ohlcv
-    except:
-        pass
-    try:
-        url = f"https://api.kucoin.com/api/v1/market/candles?type={interval}&symbol={symbol}-USDT&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if data.get('code') == '200000' and data.get('data'):
-            ohlcv = [[float(c[1]), float(c[3]), float(c[4]), float(c[2]), float(c[5])] for c in data['data']]
-            ohlcv.reverse()
-            return ohlcv
-    except:
-        pass
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 0:
-            ohlcv = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
-            return ohlcv
-    except:
-        pass
+def get_top_gainers():
+    coins = get_midcap_coins()
+    gainers = [c for c in coins if c['change_24h'] >= MIN_24H_CHANGE]
+    print(f"Найдено монет с ростом > {MIN_24H_CHANGE}%: {len(gainers)}")
+    return gainers[:TOP_GAINERS_COUNT]
+
+def get_historical_prices(coin_id, days=2):
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}&interval=hourly"
+    data = get_with_retries(url)
+    if data and 'prices' in data:
+        return [p[1] for p in data['prices']]
     return []
 
-def get_24h_stats(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
-    try:
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data['priceChangePercent']), float(data['quoteVolume'])
-    except:
-        return None, None
-
-def get_funding(symbol):
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data.get('lastFundingRate', 0)) * 100
-    except:
-        return None
-
-def get_realtime_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-    try:
-        r = requests.get(url, timeout=5)
-        return float(r.json()['price'])
-    except:
-        return None
-
-# -------------- Технические индикаторы --------------
-def rsi(closes, period=14):
-    if len(closes) < period+1:
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
         return None
     gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(diff if diff>0 else 0)
-        losses.append(-diff if diff<0 else 0)
-    avg_gain = sum(gains[-period:])/period
-    avg_loss = sum(losses[-period:])/period
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(diff if diff > 0 else 0)
+        losses.append(-diff if diff < 0 else 0)
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
-        return 100.0
-    return 100.0 - 100.0/(1+avg_gain/avg_loss)
+        return 100
+    return round(100 - 100 / (1 + avg_gain / avg_loss), 2)
 
-def compute_atr(highs, lows, closes, period=14):
-    if len(closes) < period+1:
+def analyze_coin(coin):
+    prices = get_historical_prices(coin['id'], days=2)
+    if len(prices) < 30:
         return None
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
-        trs.append(tr)
-    atr = sum(trs[-period:])/period
-    return atr
-
-def bollinger_bands(closes, period=20, std=2.0):
-    if len(closes) < period:
-        return None, None, None
-    sma = sum(closes[-period:])/period
-    variance = sum((c-sma)**2 for c in closes[-period:])/period
-    std_dev = math.sqrt(variance)
-    upper = sma + std * std_dev
-    lower = sma - std * std_dev
-    return upper, sma, lower
-
-def macd(closes, fast=12, slow=26, signal=9):
-    if len(closes) < slow+signal:
-        return None, None, None
-    def ema(data, period):
-        k = 2/(period+1)
-        ema_val = sum(data[:period])/period
-        for price in data[period:]:
-            ema_val = price*k + ema_val*(1-k)
-        return ema_val
-    ema_fast = ema(closes, fast)
-    ema_slow = ema(closes, slow)
-    macd_line = ema_fast - ema_slow
-    macd_vals = []
-    for i in range(slow-1, len(closes)):
-        e_f = ema(closes[:i+1], fast)
-        e_s = ema(closes[:i+1], slow)
-        macd_vals.append(e_f - e_s)
-    if len(macd_vals) < signal:
-        return None, None, None
-    signal_line = ema(macd_vals, signal)
-    histogram = macd_vals[-1] - signal_line
-    return macd_vals[-1], signal_line, histogram
-
-def stochastic(highs, lows, closes, k_period=14, d_period=3):
-    if len(closes) < k_period:
-        return None, None
-    highest = max(highs[-k_period:])
-    lowest = min(lows[-k_period:])
-    if highest == lowest:
-        return 50.0, 50.0
-    k = 100.0 * (closes[-1] - lowest) / (highest - lowest)
-    ks = []
-    for i in range(k_period, 0, -1):
-        h = max(highs[-i:])
-        l = min(lows[-i:])
-        if h!=l:
-            ks.append(100*(closes[-i]-l)/(h-l))
-    if len(ks) >= d_period:
-        d = sum(ks[-d_period:])/d_period
+    rsi_1h = calculate_rsi(prices, 14)
+    if rsi_1h is None:
+        return None
+    if len(prices) >= 5:
+        change_4h = (prices[-1] - prices[-5]) / prices[-5] * 100
     else:
-        d = k
-    return k, d
+        change_4h = 0
 
-def detect_candle_pattern(open_, high, low, close, prev_open, prev_close):
-    """True, если медвежий разворотный паттерн."""
-    # Медвежье поглощение
-    if prev_close > prev_open and close < open_ and close < prev_open and open_ > prev_close:
-        return True
-    # Падающая звезда
-    body = abs(close-open_)
-    if body > 0:
-        upper_wick = high - max(open_, close)
-        lower_wick = min(open_, close) - low
-        if upper_wick > body*2 and lower_wick < body*0.5:
-            return True
-    return False
+    cond_rsi = rsi_1h > RSI_1H_MIN
+    cond_change = change_4h > CHANGE_4H_MIN
+    cond_volume = coin['volume'] > VOLUME_24H_MIN
 
-# -------------- Генерация графика --------------
-def generate_chart(symbol, ohlcv_4h):
-    """Создаёт свечной график 4h с индикаторами и возвращает BytesIO."""
-    if len(ohlcv_4h) < 20:
-        return None
-    # Преобразуем в DataFrame (последние 60 свечей)
-    df = pd.DataFrame(ohlcv_4h[-60:], columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-    # Искусственный индекс времени, начиная с "сейчас" назад
-    idx = pd.date_range(end=pd.Timestamp.now(tz='Europe/Moscow'), periods=len(df), freq='4h')
-    df.index = idx
+    if cond_rsi and cond_change and cond_volume:
+        # Динамический стоп-лосс и тейк
+        stop_loss_percent = max(0.5, min(2.0, change_4h / 2))
+        tp_min_percent = min(5.0, stop_loss_percent * 2)
+        tp_max_percent = min(8.0, stop_loss_percent * 3)
 
-    # Рассчитываем линии для графика
-    ema9 = df['Close'].ewm(span=9).mean()
-    ema21 = df['Close'].ewm(span=21).mean()
-    bb_upper = df['Close'].rolling(20).mean() + 2*df['Close'].rolling(20).std()
-    bb_lower = df['Close'].rolling(20).mean() - 2*df['Close'].rolling(20).std()
+        confidence = sum([cond_rsi, cond_change, cond_volume])
+        confidence_text = "🔴 НИЗКАЯ" if confidence < 2 else "🟡 СРЕДНЯЯ" if confidence == 2 else "🟢 ВЫСОКАЯ"
+        risk_reward = round((tp_min_percent / stop_loss_percent), 1)
 
-    apds = [
-        mpf.make_addplot(ema9, color='lime', width=1),
-        mpf.make_addplot(ema21, color='orange', width=1),
-        mpf.make_addplot(bb_upper, color='gray', linestyle='dashed'),
-        mpf.make_addplot(bb_lower, color='gray', linestyle='dashed')
-    ]
+        msg = f"""
+╔═══════════════════════════════════════╗
+║   🔻 SHORT СИГНАЛ 🔻                  ║
+╚═══════════════════════════════════════╝
 
-    buf = io.BytesIO()
-    mpf.plot(df, type='candle', style='charles', volume=True,
-             addplot=apds, title=f'{symbol} 4h',
-             ylabel='Price', ylabel_lower='Volume',
-             savefig=dict(fname=buf, bbox_inches='tight'))
-    buf.seek(0)
-    return buf
+<b>Монета:</b> {coin['symbol']}
+<b>Цена входа:</b> ${coin['price']:.6f}
 
-# -------------- Анализ монеты (возвращает текст + буфер графика) --------------
-def analyze_coin(symbol):
-    ohlcv_4h = get_klines(symbol, '4h', 60)
-    ohlcv_1h = get_klines(symbol, '1h', 50)
-    if len(ohlcv_4h) < 20 or len(ohlcv_1h) < 20:
-        return None
+📊 <b>Ключевые показатели</b>
+┌────────────────────────────────────────┐
+│ RSI 1h:      {rsi_1h:.1f} {"🔴" if rsi_1h>70 else "🟢"} │
+│ Рост 24ч:    +{coin['change_24h']:.2f}% │
+│ Рост 4ч:     +{change_4h:.2f}%          │
+│ Объём 24ч:   {coin['volume']/1e6:.2f}M USDT │
+└────────────────────────────────────────┘
 
-    closes_4h = [c[3] for c in ohlcv_4h]
-    highs_4h = [c[1] for c in ohlcv_4h]
-    lows_4h = [c[2] for c in ohlcv_4h]
-    opens_4h = [c[0] for c in ohlcv_4h]
+🎯 <b>Рекомендация</b>
+• Размер позиции: <b>1.0%</b> депозита
+• Стоп-лосс:     <b>{stop_loss_percent:.1f}%</b> (цена +{stop_loss_percent:.1f}%)
+• Тейк-профит:   <b>от -{tp_min_percent:.1f}%</b> до <b>-{tp_max_percent:.1f}%</b>
 
-    closes_1h = [c[3] for c in ohlcv_1h]
-    highs_1h = [c[1] for c in ohlcv_1h]
-    lows_1h = [c[2] for c in ohlcv_1h]
-    opens_1h = [c[0] for c in ohlcv_1h]
+💡 <b>Обоснование</b>
+{"" if not cond_rsi else f"• RSI 1h ({rsi_1h:.1f}) находится в зоне перекупленности (>70)."}
+{"" if not cond_change else f"• Рост за 4 часа ({change_4h:.2f}%) указывает на возможное истощение импульса."}
+{"" if not cond_volume else f"• Объём торгов ({coin['volume']/1e6:.2f}M) подтверждает ликвидность."}
+<b>Уверенность сигнала:</b> {confidence_text}
 
-    rsi_4h = rsi(closes_4h)
-    rsi_1h = rsi(closes_1h)
-    if rsi_4h is None or rsi_1h is None:
-        return None
+⚠️ <b>Риск-менеджмент</b>
+Рекомендуемое соотношение риск/прибыль: 1:{risk_reward:.1f}
 
-    bb_upper, bb_mid, bb_lower = bollinger_bands(closes_4h, BB_PERIOD, BB_STD)
-    if bb_upper is None:
-        return None
-    price_above_bb = closes_4h[-1] > bb_upper
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        return msg
+    return None
 
-    macd_line, signal_line, histogram = macd(closes_1h)
-    macd_bearish = macd_line is not None and signal_line is not None and macd_line < signal_line
-
-    stoch_k, stoch_d = stochastic(highs_4h, lows_4h, closes_4h, STOCH_K_PERIOD, STOCH_D_PERIOD)
-    stoch_over = stoch_k is not None and stoch_k > STOCH_OVERBOUGHT
-
-    atr_val = compute_atr(highs_1h, lows_1h, closes_1h, ATR_PERIOD)
-    if atr_val is None:
-        return None
-
-    change_24h, volume_24h = get_24h_stats(symbol)
-    if change_24h is None or volume_24h is None:
-        return None
-    if len(ohlcv_4h) >= 2:
-        change_4h = (closes_4h[-1] - closes_4h[-2]) / closes_4h[-2] * 100
-    else:
-        return None
-
-    funding = get_funding(symbol)
-    real_price = get_realtime_price(symbol)
-    if real_price is None:
-        return None
-
-    # Свечной паттерн (4h)
-    if len(ohlcv_4h) >= 2:
-        prev_open = opens_4h[-2]
-        prev_close = closes_4h[-2]
-        candle_bearish = detect_candle_pattern(opens_4h[-1], highs_4h[-1], lows_4h[-1], closes_4h[-1], prev_open, prev_close)
-    else:
-        candle_bearish = False
-
-    # Обязательные условия
-    if not (rsi_4h >= RSI_4H_MIN and rsi_1h >= RSI_1H_MIN and change_4h >= CHANGE_4H_MIN and
-            funding is not None and funding >= FUNDING_MIN and volume_24h >= VOLUME_24H_MIN):
-        return None
-
-    # Дополнительные подтверждения
-    confirmations = []
-    if price_above_bb:
-        confirmations.append(f"• Цена выше верхней полосы Боллинджера (4h) – перекупленность")
-    if macd_bearish:
-        confirmations.append(f"• MACD медвежий (1h) – сигнал разворота")
-    if stoch_over:
-        confirmations.append(f"• Стохастик перекуплен (>80) – возможен откат")
-    if candle_bearish:
-        confirmations.append(f"• Медвежий свечной паттерн (4h) – давление продавцов")
-
-    if len(confirmations) < 2:
-        return None
-
-    entry = real_price
-    sl = entry + SL_ATR_MULT * atr_val
-    tp1 = entry - TP1_ATR_MULT * atr_val
-    tp2 = entry - TP2_ATR_MULT * atr_val
-
-    reason_text = "\n".join(confirmations)
-
-    msg = f"""🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | Цена: {entry:.6f}
-
-<b>Вход:</b> {entry:.6f}
-<b>Стоп-лосс:</b> {sl:.6f} (ATR × {SL_ATR_MULT})
-<b>Тейк-профит 1:</b> {tp1:.6f} (ATR × {TP1_ATR_MULT})
-<b>Тейк-профит 2:</b> {tp2:.6f} (ATR × {TP2_ATR_MULT})
-
-<b>Индикаторы:</b>
-RSI 4h: {rsi_4h:.1f} | RSI 1h: {rsi_1h:.1f}
-Рост за 4ч: {change_4h:+.2f}%
-Фандинг: {funding:+.4f}%
-Объём 24ч: {volume_24h/1e6:.2f}M USDT
-
-<b>Подтверждения:</b>
-{reason_text}
-
-⏰ {moscow_now().strftime('%Y-%m-%d %H:%M')} (МСК)"""
-
-    # Генерируем график
-    chart_buf = generate_chart(symbol, ohlcv_4h)
-    if chart_buf is None:
-        return None
-    return (msg, chart_buf)
-
-# -------------- Сканер --------------
-def scan_market():
-    print(f"[{moscow_now().strftime('%H:%M')} МСК] Запуск анализа...")
-    coins = get_low_volume_coins()
-    if not coins:
-        send_telegram("⚠️ Не удалось получить список монет")
-        return
-    signals = []
-    for idx, symbol in enumerate(coins):
-        try:
-            result = analyze_coin(symbol)
-            if result:
-                signals.append(result)
-                print(f"✅ Сигнал: {symbol}")
-        except Exception as e:
-            print(f"Ошибка {symbol}: {e}")
-        time.sleep(0.3)
-        if idx % 50 == 0:
-            print(f"Обработано {idx}/{len(coins)}")
-    for msg, chart in signals:
-        send_telegram_photo(msg, chart)
-        time.sleep(2)
-    print(f"Готово. Сигналов: {len(signals)}")
-
-def is_working_hours():
-    now = moscow_now()
-    return WORK_START_HOUR <= now.hour < WORK_END_HOUR
+def main():
+    send_telegram("🚀 Бот (менее популярные монеты, SHORT-сигналы) запущен.")
+    while True:
+        print(f"\n[{datetime.now()}] Поиск монет с ростом > {MIN_24H_CHANGE}%...")
+        gainers = get_top_gainers()
+        if not gainers:
+            print("Нет монет, жду 30 минут.")
+            time.sleep(1800)
+            continue
+        print(f"Найдено лидеров роста: {len(gainers)}")
+        signals = []
+        for coin in gainers:
+            print(f"Анализ {coin['symbol']}...")
+            try:
+                msg = analyze_coin(coin)
+                if msg:
+                    signals.append(msg)
+            except Exception as e:
+                print(f"Ошибка {coin['symbol']}: {e}")
+            time.sleep(DELAY_BETWEEN_COINS)
+        for msg in signals:
+            send_telegram(msg)
+            time.sleep(2)
+        print(f"Цикл завершён. Жду {CHECK_INTERVAL // 60} минут.\n")
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    print(f"Бот запущен с графиками. Работает с {WORK_START_HOUR}:00 до {WORK_END_HOUR}:00 МСК, интервал {SCAN_INTERVAL_MINUTES} мин.")
-    last_scan_time = None
-    while True:
-        if is_working_hours():
-            now = moscow_now()
-            if last_scan_time is None or (now - last_scan_time) >= timedelta(minutes=SCAN_INTERVAL_MINUTES):
-                print(f"Старт в {now.strftime('%H:%M')} МСК")
-                scan_market()
-                last_scan_time = moscow_now()
-        else:
-            if last_scan_time is not None:
-                print(f"Нерабочее время. Ожидание {WORK_START_HOUR}:00 МСК.")
-                last_scan_time = None
-        time.sleep(60)
+    main()
