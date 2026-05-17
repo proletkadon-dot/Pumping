@@ -37,10 +37,13 @@ def get_main_inline_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ---------------------- БИРЖИ (ТОЛЬКО РАБОТАЮЩИЕ) ----------------------
+# ---------------------- РАСШИРЕННЫЙ СПИСОК БИРЖ (ФЬЮЧЕРСЫ) ----------------------
 EXCHANGES = [
     ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
-    ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+    ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
+    ccxt.gateio({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+    ccxt.htx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
+    ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 ]
 
 TIMEFRAMES = {'5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d'}
@@ -504,11 +507,11 @@ def format_signal_response(symbol: str, timeframe: str, indicators: Dict,
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     await message.reply(
-        "🤖 **Крипто-Аналитик Бот (v4.2)**\n\n"
+        "🤖 **Крипто-Аналитик Бот (v4.3)**\n\n"
         "📌 **Как пользоваться:**\n"
         "Нажмите на кнопку нужной команды → текст появится в поле ввода.\n"
         "Вы можете **отредактировать** его, затем отправить.\n\n"
-        "✅ Анализ фьючерсов через OKX и KuCoin.\n"
+        "✅ Анализ фьючерсов через OKX, KuCoin, Gate.io, HTX, Mexc.\n"
         "✅ Галочки ✅/❌ напротив условий.\n"
         "✅ Комментарий с объяснением сигнала.\n\n"
         "👇 **Кнопки команд**:",
@@ -524,7 +527,7 @@ async def help_cmd(message: Message):
         "Доступные таймфреймы: 5m, 15m, 1h, 4h, 1d\n\n"
         "`/backtest ...` – бэктестинг\n"
         "`/train` – обучение нейросети\n\n"
-        "Используются биржи: OKX, KuCoin (фьючерсы)\n"
+        "Используются биржи: OKX, KuCoin, Gate.io, HTX, Mexc (фьючерсы)\n"
         "SL/TP = ±1.5 ATR / ±2.5 ATR",
         parse_mode="Markdown",
         reply_markup=get_main_inline_keyboard()
@@ -549,12 +552,18 @@ async def signal_cmd(message: Message):
 
     live_price, _ = await fetch_live_price(symbol)
     if live_price is None:
-        await status.edit_text("❌ Не удалось получить цену (попробуйте другую пару или позже).")
+        await status.edit_text("❌ Не удалось получить цену. Попробуйте другую пару или позже.")
         return
 
     df = await fetch_ohlcv_any(symbol, timeframe, limit=150)
     if df is None or df.empty:
-        await status.edit_text(f"⚠️ Нет исторических данных для {symbol} {timeframe}. Текущая цена: `${live_price:.2f}`")
+        await status.edit_text(
+            f"⚠️ **Исторические данные для {symbol} {timeframe} не найдены**\n"
+            f"💰 Текущая цена: `${live_price:.2f}`\n\n"
+            "Невозможно рассчитать индикаторы (RSI, MACD, ATR и др.).\n"
+            "Попробуйте другой таймфрейм или пару, либо повторите позже.\n"
+            "Иногда биржи временно блокируют запросы."
+        )
         return
 
     ob_analysis = await fetch_orderbook_analysis(symbol, limit=20)
@@ -605,7 +614,7 @@ async def train_cmd(message: Message):
 
 # ======================== ЗАПУСК ========================
 async def main():
-    logger.info("Запуск бота (только OKX/KuCoin, handle_signals=False)")
+    logger.info("Запуск бота (5 бирж: OKX, KuCoin, Gate.io, HTX, Mexc)")
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
