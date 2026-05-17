@@ -27,7 +27,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------------------- ИНЛАЙН-КЛАВИАТУРА (вставка в поле ввода) ----------------------
+# ---------------------- КЛАВИАТУРА ----------------------
 def get_main_inline_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="📊 /signal BTC/USDT 1h", switch_inline_query_current_chat="/signal BTC/USDT 1h")],
@@ -37,10 +37,8 @@ def get_main_inline_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ---------------------- НАСТРОЙКИ БИРЖ (ФЬЮЧЕРСЫ) ----------------------
+# ---------------------- БИРЖИ (ТОЛЬКО РАБОТАЮЩИЕ) ----------------------
 EXCHANGES = [
-    ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}),
-    ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}}),
     ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}}),
     ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
 ]
@@ -104,7 +102,6 @@ async def fetch_ohlcv_any(symbol: str, timeframe: str, limit: int = 150) -> Opti
             loop = asyncio.get_event_loop()
             ohlcv = await loop.run_in_executor(None, exchange.fetch_ohlcv, symbol, timeframe, limit)
             if not ohlcv or len(ohlcv) < 20:
-                logger.warning(f"⚠️ {exchange.name} вернул мало данных ({len(ohlcv) if ohlcv else 0})")
                 continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -147,10 +144,9 @@ async def fetch_orderbook_analysis(symbol: str, limit: int = 20) -> Optional[Dic
             continue
     return None
 
-# ======================== РАСЧЁТ ИНДИКАТОРОВ (С ЗАЩИТОЙ ОТ ПУСТОГО DF) ========================
+# ======================== РАСЧЁТ ИНДИКАТОРОВ (С ЗАЩИТОЙ) ========================
 def calculate_indicators(df: pd.DataFrame, live_price: float = None) -> Dict:
     if df is None or df.empty:
-        logger.error("DataFrame пуст, невозможно рассчитать индикаторы")
         return {
             'price': live_price or 0,
             'rsi': 50, 'macd_histogram': 0, 'ema9': 0, 'ema21': 0,
@@ -159,7 +155,6 @@ def calculate_indicators(df: pd.DataFrame, live_price: float = None) -> Dict:
             'price_above_cloud': False, 'volume_above_avg': False,
         }
     df = df.copy()
-    # Если передан live_price, обновляем последнюю свечу
     if live_price and len(df) > 0:
         df.iloc[-1, df.columns.get_loc('close')] = live_price
         df.iloc[-1, df.columns.get_loc('high')] = max(df.iloc[-1, df.columns.get_loc('high')], live_price)
@@ -230,7 +225,6 @@ def calculate_indicators(df: pd.DataFrame, live_price: float = None) -> Dict:
     df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_above_avg'] = df['volume'] > df['volume_sma']
 
-    # Текущие значения (с защитой от NaN)
     def safe_float(val, default):
         return float(val) if pd.notna(val) else default
 
@@ -325,7 +319,7 @@ def get_feature_vector(indicators: Dict) -> np.ndarray:
     return np.array([indicators['rsi'], indicators['macd_histogram'], ema_diff,
                      indicators['atr'], bb_pos, indicators['adx'], indicators['mfi'], indicators['stoch_k']])
 
-# ======================== ГАЛОЧКИ ========================
+# ======================== ГАЛОЧКИ И КОММЕНТАРИЙ ========================
 def format_conditions_checklist(indicators: Dict, ob_analysis: Dict = None) -> str:
     price = indicators['price']
     rsi_bull = indicators['rsi'] < 40
@@ -384,7 +378,6 @@ def format_conditions_checklist(indicators: Dict, ob_analysis: Dict = None) -> s
     checklist += f"{'✅' if ob_bear else '❌'} Стакан: давление продавцов\n"
     return checklist
 
-# ======================== КОММЕНТАРИЙ ========================
 def generate_commentary(symbol: str, final_signal: str, raw_signal: str,
                         indicators: Dict, long_cond_count: int, short_cond_count: int,
                         neural_prob: float, ob_analysis: Dict = None) -> str:
@@ -452,7 +445,7 @@ def generate_commentary(symbol: str, final_signal: str, raw_signal: str,
             commentary += f"**Нейтрально** — бычьих условий {long_cond_count}, медвежьих {short_cond_count} (требуется минимум 6 для сигнала). Рекомендуется воздержаться от сделки или дождаться более чёткого сигнала."
     return commentary
 
-# ======================== ФОРМАТИРОВАНИЕ ОТВЕТА ========================
+# ======================== ФОРМАТ ОТВЕТА ========================
 def format_signal_response(symbol: str, timeframe: str, indicators: Dict,
                            final_signal: str, raw_signal: str, levels: Dict, prob: float,
                            ob_analysis: Dict = None, long_cond_count: int = 0, short_cond_count: int = 0) -> str:
@@ -511,15 +504,14 @@ def format_signal_response(symbol: str, timeframe: str, indicators: Dict,
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     await message.reply(
-        "🤖 **Крипто-Аналитик Бот (v4.1)**\n\n"
+        "🤖 **Крипто-Аналитик Бот (v4.2)**\n\n"
         "📌 **Как пользоваться:**\n"
         "Нажмите на кнопку нужной команды → текст появится в поле ввода.\n"
-        "Вы можете **отредактировать** его (например, изменить пару или таймфрейм), затем отправить.\n\n"
-        "✅ Добавлен анализ **стакана заявок** (имбаланс, стены, давление).\n"
-        "✅ Живая цена фьючерсов через fetch_ticker.\n"
-        "✅ **Галочки ✅/❌** напротив каждого бычьего и медвежьего условия.\n"
-        "✅ Комментарий бота объясняет, почему сигнал принят или отклонён (в том числе нейросетью).\n\n"
-        "👇 **Кнопки команд** (текст появится в поле ввода):",
+        "Вы можете **отредактировать** его, затем отправить.\n\n"
+        "✅ Анализ фьючерсов через OKX и KuCoin.\n"
+        "✅ Галочки ✅/❌ напротив условий.\n"
+        "✅ Комментарий с объяснением сигнала.\n\n"
+        "👇 **Кнопки команд**:",
         parse_mode="Markdown",
         reply_markup=get_main_inline_keyboard()
     )
@@ -530,14 +522,9 @@ async def help_cmd(message: Message):
         "📚 **Справка**\n\n"
         "`/signal BTC/USDT 4h` – анализ пары на таймфрейме\n"
         "Доступные таймфреймы: 5m, 15m, 1h, 4h, 1d\n\n"
-        "`/backtest BTC/USDT 1h 2025-01-01 2025-03-01` – бэктестинг\n\n"
-        "`/train` – обучение нейросети на размеченных сигналах из БД\n\n"
-        "**Что анализируется:**\n"
-        "📊 Индикаторы: RSI, MACD, EMA, BB, ATR, ADX, MFI, StochRSI, объём, Ишимоку\n"
-        "📖 Стакан: имбаланс, спред, крупные стены\n"
-        "🤖 Нейросетевое подтверждение (после обучения)\n"
-        "💬 Комментарий бота с объяснением ситуации\n"
-        "✅❌ Галочки показывают выполнение каждого условия\n\n"
+        "`/backtest ...` – бэктестинг\n"
+        "`/train` – обучение нейросети\n\n"
+        "Используются биржи: OKX, KuCoin (фьючерсы)\n"
         "SL/TP = ±1.5 ATR / ±2.5 ATR",
         parse_mode="Markdown",
         reply_markup=get_main_inline_keyboard()
@@ -547,7 +534,7 @@ async def help_cmd(message: Message):
 async def signal_cmd(message: Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("❌ Пример: `/signal BTC/USDT 1h`\n\nВы можете нажать кнопку ниже, затем отредактировать.", parse_mode="Markdown")
+        await message.reply("❌ Пример: `/signal BTC/USDT 1h`", parse_mode="Markdown")
         return
     symbol = args[1].upper()
     if '/' not in symbol:
@@ -562,18 +549,15 @@ async def signal_cmd(message: Message):
 
     live_price, _ = await fetch_live_price(symbol)
     if live_price is None:
-        await status.edit_text("❌ Не удалось получить живую цену ни с одной биржи.")
+        await status.edit_text("❌ Не удалось получить цену (попробуйте другую пару или позже).")
         return
 
     df = await fetch_ohlcv_any(symbol, timeframe, limit=150)
     if df is None or df.empty:
-        await status.edit_text(f"⚠️ Нет исторических данных для {symbol} {timeframe}. Цена: `${live_price:.2f}`\nНевозможно рассчитать индикаторы.")
+        await status.edit_text(f"⚠️ Нет исторических данных для {symbol} {timeframe}. Текущая цена: `${live_price:.2f}`")
         return
 
     ob_analysis = await fetch_orderbook_analysis(symbol, limit=20)
-    if ob_analysis is None:
-        logger.warning("Не удалось получить данные стакана, продолжаем без них")
-
     indicators = calculate_indicators(df, live_price)
     raw_signal, long_cond, short_cond = generate_raw_signal(indicators, ob_analysis)
     long_cond_count = len(long_cond)
@@ -599,43 +583,29 @@ async def signal_cmd(message: Message):
 
 @dp.message(Command("backtest"))
 async def backtest_cmd(message: Message):
-    args = message.text.split()
-    if len(args) < 3:
-        await message.reply("❌ Использование: `/backtest BTC/USDT 1h 2025-01-01 2025-03-01`\n(даты необязательны)", parse_mode="Markdown")
-        return
-    symbol = args[1].upper()
-    if '/' not in symbol:
-        if symbol.endswith('USDT'):
-            symbol = symbol[:-4] + '/' + symbol[-4:]
-    timeframe = args[2]
-    start = args[3] if len(args) > 3 else None
-    end = args[4] if len(args) > 4 else None
-    status = await message.reply(f"📊 Запуск бэктестинга {symbol} {timeframe}...")
-    await status.edit_text("📈 Бэктестинг в разработке (пока без учёта стакана).\nИспользуйте `/signal` для текущего анализа.")
+    await message.reply("📈 Бэктестинг в разработке. Используйте `/signal` для текущего анализа.")
 
 @dp.message(Command("train"))
 async def train_cmd(message: Message):
-    await message.reply("🔄 Обучение нейросети на истории сигналов...")
+    await message.reply("🔄 Обучение нейросети...")
     conn = sqlite3.connect('signals.db')
     df_db = pd.read_sql_query("SELECT * FROM signals WHERE outcome IS NOT NULL", conn)
     conn.close()
     if len(df_db) < 20:
-        await message.reply("❌ Недостаточно размеченных сигналов (нужно минимум 20). Вручную проставьте исходы (outcome='win'/'loss') и pnl в БД.")
+        await message.reply("❌ Недостаточно размеченных сигналов (нужно минимум 20).")
         return
     features, labels = [], []
     for _, row in df_db.iterrows():
         ema_diff = row['ema9'] - row['ema21']
-        bb_pos = 0.5
-        feats = [row['rsi'], row['macd_hist'], ema_diff, row['atr'], bb_pos, row['adx'], row['mfi'], row['stoch_k']]
+        feats = [row['rsi'], row['macd_hist'], ema_diff, row['atr'], 0.5, row['adx'], row['mfi'], row['stoch_k']]
         features.append(feats)
         labels.append(1 if row['outcome'] == 'win' else 0)
     confirmer.train(np.array(features), np.array(labels))
-    await message.reply("✅ Нейросеть успешно обучена и сохранена в model.pkl")
+    await message.reply("✅ Нейросеть обучена.")
 
-# ======================== ЗАПУСК (С ОТКЛЮЧЕНИЕМ СИГНАЛОВ ДЛЯ RENDER) ========================
+# ======================== ЗАПУСК ========================
 async def main():
-    logger.info("Запуск фьючерсного бота с редактируемыми командами (switch_inline_query_current_chat)")
-    # handle_signals=False необходимо для работы в потоке на Render
+    logger.info("Запуск бота (только OKX/KuCoin, handle_signals=False)")
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
