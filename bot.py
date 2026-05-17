@@ -29,7 +29,6 @@ dp = Dispatcher()
 
 # ---------------------- ИНЛАЙН-КЛАВИАТУРА (вставка в поле ввода) ----------------------
 def get_main_inline_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки, которые вставляют текст команды в поле ввода, не отправляя."""
     buttons = [
         [InlineKeyboardButton(text="📊 /signal BTC/USDT 1h", switch_inline_query_current_chat="/signal BTC/USDT 1h")],
         [InlineKeyboardButton(text="📈 /backtest", switch_inline_query_current_chat="/backtest BTC/USDT 1h 2025-01-01 2025-03-01")],
@@ -104,9 +103,12 @@ async def fetch_ohlcv_any(symbol: str, timeframe: str, limit: int = 150) -> Opti
         try:
             loop = asyncio.get_event_loop()
             ohlcv = await loop.run_in_executor(None, exchange.fetch_ohlcv, symbol, timeframe, limit)
+            if not ohlcv or len(ohlcv) < 20:
+                logger.warning(f"⚠️ {exchange.name} вернул мало данных ({len(ohlcv) if ohlcv else 0})")
+                continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            logger.info(f"📊 Исторические данные от {exchange.name} для {symbol}")
+            logger.info(f"📊 Исторические данные от {exchange.name} для {symbol} ({len(df)} свечей)")
             return df
         except Exception as e:
             logger.warning(f"⚠️ {exchange.name} не дал свечи: {e}")
@@ -118,10 +120,12 @@ async def fetch_orderbook_analysis(symbol: str, limit: int = 20) -> Optional[Dic
         try:
             loop = asyncio.get_event_loop()
             orderbook = await loop.run_in_executor(None, exchange.fetch_order_book, symbol, limit)
+            if not orderbook['bids'] or not orderbook['asks']:
+                continue
             bids_volume = sum([bid[1] for bid in orderbook['bids']])
             asks_volume = sum([ask[1] for ask in orderbook['asks']])
-            best_bid = orderbook['bids'][0][0] if orderbook['bids'] else 0
-            best_ask = orderbook['asks'][0][0] if orderbook['asks'] else 0
+            best_bid = orderbook['bids'][0][0]
+            best_ask = orderbook['asks'][0][0]
             spread = best_ask - best_bid
             spread_pct = (spread / best_bid) * 100 if best_bid else 0
             max_bid_wall = max(orderbook['bids'], key=lambda x: x[1]) if orderbook['bids'] else (0,0)
@@ -143,10 +147,20 @@ async def fetch_orderbook_analysis(symbol: str, limit: int = 20) -> Optional[Dic
             continue
     return None
 
-# ======================== РАСЧЁТ ИНДИКАТОРОВ ========================
+# ======================== РАСЧЁТ ИНДИКАТОРОВ (С ЗАЩИТОЙ ОТ ПУСТОГО DF) ========================
 def calculate_indicators(df: pd.DataFrame, live_price: float = None) -> Dict:
+    if df is None or df.empty:
+        logger.error("DataFrame пуст, невозможно рассчитать индикаторы")
+        return {
+            'price': live_price or 0,
+            'rsi': 50, 'macd_histogram': 0, 'ema9': 0, 'ema21': 0,
+            'bb_lower': 0, 'bb_upper': 0, 'atr': 0, 'adx': 20,
+            'obv_bullish': False, 'mfi': 50, 'stoch_k': 50, 'stoch_d': 50,
+            'price_above_cloud': False, 'volume_above_avg': False,
+        }
     df = df.copy()
-    if live_price:
+    # Если передан live_price, обновляем последнюю свечу
+    if live_price and len(df) > 0:
         df.iloc[-1, df.columns.get_loc('close')] = live_price
         df.iloc[-1, df.columns.get_loc('high')] = max(df.iloc[-1, df.columns.get_loc('high')], live_price)
         df.iloc[-1, df.columns.get_loc('low')] = min(df.iloc[-1, df.columns.get_loc('low')], live_price)
@@ -216,20 +230,24 @@ def calculate_indicators(df: pd.DataFrame, live_price: float = None) -> Dict:
     df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_above_avg'] = df['volume'] > df['volume_sma']
 
+    # Текущие значения (с защитой от NaN)
+    def safe_float(val, default):
+        return float(val) if pd.notna(val) else default
+
     current = {
-        'price': float(df['close'].iloc[-1]),
-        'rsi': float(df['rsi'].iloc[-1]) if pd.notna(df['rsi'].iloc[-1]) else 50,
-        'macd_histogram': float(df['macd_histogram'].iloc[-1]) if pd.notna(df['macd_histogram'].iloc[-1]) else 0,
-        'ema9': float(df['ema9'].iloc[-1]) if pd.notna(df['ema9'].iloc[-1]) else 0,
-        'ema21': float(df['ema21'].iloc[-1]) if pd.notna(df['ema21'].iloc[-1]) else 0,
-        'bb_lower': float(df['bb_lower'].iloc[-1]) if pd.notna(df['bb_lower'].iloc[-1]) else 0,
-        'bb_upper': float(df['bb_upper'].iloc[-1]) if pd.notna(df['bb_upper'].iloc[-1]) else 0,
-        'atr': float(df['atr'].iloc[-1]) if pd.notna(df['atr'].iloc[-1]) else 0,
-        'adx': float(df['adx'].iloc[-1]) if pd.notna(df['adx'].iloc[-1]) else 20,
+        'price': safe_float(df['close'].iloc[-1], live_price or 0),
+        'rsi': safe_float(df['rsi'].iloc[-1], 50),
+        'macd_histogram': safe_float(df['macd_histogram'].iloc[-1], 0),
+        'ema9': safe_float(df['ema9'].iloc[-1], 0),
+        'ema21': safe_float(df['ema21'].iloc[-1], 0),
+        'bb_lower': safe_float(df['bb_lower'].iloc[-1], 0),
+        'bb_upper': safe_float(df['bb_upper'].iloc[-1], 0),
+        'atr': safe_float(df['atr'].iloc[-1], 0),
+        'adx': safe_float(df['adx'].iloc[-1], 20),
         'obv_bullish': bool(df['obv_bullish'].iloc[-1]) if pd.notna(df['obv_bullish'].iloc[-1]) else False,
-        'mfi': float(df['mfi'].iloc[-1]) if pd.notna(df['mfi'].iloc[-1]) else 50,
-        'stoch_k': float(df['stoch_k'].iloc[-1]) if pd.notna(df['stoch_k'].iloc[-1]) else 50,
-        'stoch_d': float(df['stoch_d'].iloc[-1]) if pd.notna(df['stoch_d'].iloc[-1]) else 50,
+        'mfi': safe_float(df['mfi'].iloc[-1], 50),
+        'stoch_k': safe_float(df['stoch_k'].iloc[-1], 50),
+        'stoch_d': safe_float(df['stoch_d'].iloc[-1], 50),
         'price_above_cloud': bool(df['price_above_cloud'].iloc[-1]) if pd.notna(df['price_above_cloud'].iloc[-1]) else False,
         'volume_above_avg': bool(df['volume_above_avg'].iloc[-1]) if pd.notna(df['volume_above_avg'].iloc[-1]) else False,
     }
@@ -493,7 +511,7 @@ def format_signal_response(symbol: str, timeframe: str, indicators: Dict,
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     await message.reply(
-        "🤖 **Крипто-Аналитик Бот (v4.0)**\n\n"
+        "🤖 **Крипто-Аналитик Бот (v4.1)**\n\n"
         "📌 **Как пользоваться:**\n"
         "Нажмите на кнопку нужной команды → текст появится в поле ввода.\n"
         "Вы можете **отредактировать** его (например, изменить пару или таймфрейм), затем отправить.\n\n"
@@ -548,8 +566,8 @@ async def signal_cmd(message: Message):
         return
 
     df = await fetch_ohlcv_any(symbol, timeframe, limit=150)
-    if df is None:
-        await status.edit_text(f"⚠️ Нет исторических данных, но текущая цена: `${live_price:.2f}`\nНевозможно рассчитать индикаторы.")
+    if df is None or df.empty:
+        await status.edit_text(f"⚠️ Нет исторических данных для {symbol} {timeframe}. Цена: `${live_price:.2f}`\nНевозможно рассчитать индикаторы.")
         return
 
     ob_analysis = await fetch_orderbook_analysis(symbol, limit=20)
@@ -614,10 +632,10 @@ async def train_cmd(message: Message):
     confirmer.train(np.array(features), np.array(labels))
     await message.reply("✅ Нейросеть успешно обучена и сохранена в model.pkl")
 
-# ======================== ЗАПУСК ========================
+# ======================== ЗАПУСК (С ОТКЛЮЧЕНИЕМ СИГНАЛОВ ДЛЯ RENDER) ========================
 async def main():
     logger.info("Запуск фьючерсного бота с редактируемыми командами (switch_inline_query_current_chat)")
-    # handle_signals=False отключает установку обработчиков сигналов в дочернем потоке
+    # handle_signals=False необходимо для работы в потоке на Render
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
