@@ -617,7 +617,8 @@ async def train_cmd(message: Message):
 # ======================== ЗАПУСК ========================
 async def main():
     logger.info("Запуск фьючерсного бота с редактируемыми командами (switch_inline_query_current_chat)")
-    await dp.start_polling(bot)
+    # handle_signals=False отключает установку обработчиков сигналов в дочернем потоке
+    await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
